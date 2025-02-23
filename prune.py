@@ -559,6 +559,16 @@ def ww_sparsity_llama3_8b(args, model, device=torch.device("cuda:0"),
     
     print("Combined layerwise pruning ratios:", combined_ratios)
     return combined_ratios
+
+def ww_sparsity_test_uni(args, model, device=torch.device("cuda:0"),
+                         s1=0.8, s2=1.2, ratios=None, prune_n=0, prune_m=0,
+                         weight_esd=0.5, eps=1e-8):
+    a = []
+    for i in range(32 * 7):
+        a.append(args.sparsity_ratio)
+    a = torch.tensor(a, dtype=torch.float32)
+    print(a)
+    return  a.cpu().numpy().tolist()
 #########################################################################################################################
 
 def prune_magnitude(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, prune_m=0, ratios=None):
@@ -792,7 +802,7 @@ def prune_magnitude_ww2(args, model, tokenizer, device=torch.device("cuda:0"), p
     s1 = 1.0 - args.epsilon
     s2 = 1.0 + args.epsilon
     
-    all_layer_ratio = ww_sparsity_llama3_8b(args, model, device, s1, s2)
+    all_layer_ratio = ww_sparsity_test_uni(args, model, device, s1, s2)
     # magnitude pruning
     prune_magnitude(args, model, tokenizer, device, ratios=all_layer_ratio)
     
@@ -809,7 +819,7 @@ def prune_wanda_ww2(args, model, tokenizer, device=torch.device("cuda:0"), prune
     s1 = 1.0 - args.epsilon
     s2 = 1.0 + args.epsilon
 
-    all_layer_ratio = ww_sparsity_llama3_8b(args, model, device, s1, s2)
+    all_layer_ratio = ww_sparsity_test_uni(args, model, device, s1, s2)
     # wanda pruning
     prune_wanda(args, model, tokenizer, device, ratios=all_layer_ratio)   
     
