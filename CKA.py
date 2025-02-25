@@ -323,6 +323,74 @@ class SGLPPruner:
 
         return segment_scores
 
+    def compute_segment_scores2(self, segments: Dict[int, List[int]], num_samples: int=8, seq_len: int=128):
+        """
+        计算 GradNorm-Hill（归一化的梯度重要性）作为每个 segment 的重要性。
+        """
+        self.gradients.clear()
+        layers = self.get_layers()
+
+        hooks = []
+        for idx, layer in enumerate(layers):
+            h = layer.register_backward_hook(
+                lambda m, gi, go, idx=idx: self._hook_gradients(m, gi, go, idx)
+            )
+            hooks.append(h)
+
+        self.model.train()
+
+        # 同样优先用真实文本
+        if self.tokenizer is not None:
+            input_ids = get_real_input(self.device, self.tokenizer, num_samples=num_samples, seq_len=seq_len)
+        else:
+            print("[Warning] No tokenizer available, fallback to random input.")
+            input_ids = torch.randint(
+                0, self.config.vocab_size,
+                (num_samples, seq_len),
+                device=self.device
+            )
+
+        labels = input_ids.clone()
+        outputs = self.model(input_ids, labels=labels)
+        loss = outputs.loss
+        loss.backward()
+
+        for h in hooks:
+            h.remove()
+        torch.cuda.empty_cache()
+
+        segment_gradnorms = {}  # 存储每个 Segment 的 GradNorm
+        gradnorm_values = []  # 存储所有 GradNorm 以计算 G_max 和 G_bulk
+
+        for seg_id, layer_idxs in segments.items():
+            g_norm_sum = 0.0
+            valid_count = 0
+            for lid in layer_idxs:
+                if lid in self.gradients:
+                    gn = torch.norm(self.gradients[lid]).item()
+                    g_norm_sum += gn
+                    valid_count += 1
+                    gradnorm_values.append(gn)  # 记录所有 GradNorm
+
+            if valid_count > 0:
+                segment_gradnorms[seg_id] = g_norm_sum / valid_count
+            else:
+                segment_gradnorms[seg_id] = 0.0
+
+        # 计算 G_max 和 G_bulk
+        if len(gradnorm_values) > 0:
+            G_max = max(gradnorm_values)
+            G_bulk = sum(gradnorm_values) / len(gradnorm_values)  # 计算均值
+        else:
+            G_max = 1.0  # 避免除零
+            G_bulk = 1.0
+
+        # 计算 GradNorm-Hill
+        segment_scores = {seg_id: segment_gradnorms[seg_id] / (G_bulk + 1e-8) for seg_id in segment_gradnorms}
+
+        return segment_scores
+
+
     def prune_segments(self, segments: Dict[int, List[int]],
                        seg_scores: Dict[int, float],
                        prune_ratio: float=0.3):
@@ -405,7 +473,7 @@ if __name__ == "__main__":
         pruner.visualize(cka_mat, segments)
 
     print("[Main] Compute GradNorm for each segment (using real text input if possible) ...")
-    seg_scores = pruner.compute_segment_scores(segments, num_samples=8, seq_len=128)
+    seg_scores = pruner.compute_segment_scores2(segments, num_samples=8, seq_len=128)
 
     print("[Segment Importance Scores]")
     for sid, score in seg_scores.items():
