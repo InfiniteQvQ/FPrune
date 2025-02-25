@@ -522,11 +522,11 @@ def ww_sparsity_llama_7b_hill(args, model, device=torch.device("cuda:0"),
     for i in importance:
         for j in range(7):
             ww_importance.append(i)
-    
-    adam_importance = []
-    for g_hill, a_hill in zip(ww_importance, metrics):
-        importance = (alpha * g_hill) / (np.sqrt(beta * a_hill) + epsilon)
-        adam_importance.append(importance)
+    I_min = np.min(ww_importance)
+    I_max = np.max(ww_importance)
+    norm_importance = (ww_importance - I_min) / (I_max - I_min + 1e-8)
+
+    adam_importance = (alpha * norm_importance) / (np.sqrt(beta * metrics) + epsilon)
     I_min = np.min(adam_importance)
     I_max = np.max(adam_importance)
     norm_importance = (adam_importance - I_min) / (I_max - I_min + 1e-8)
