@@ -487,6 +487,66 @@ def ww_sparsity_llama2_7b(args, model, device=torch.device("cuda:0"),
     print("Combined layerwise pruning ratios:", combined_ratios)
     return combined_ratios
 
+def ww_sparsity_llama_7b_hill(args, model, device=torch.device("cuda:0"),
+                         s1=0.8, s2=1.2, alpha=0.8, beta=0.999, epsilon=1e-8):
+    
+    if "opt" in args.model:
+        blocks = model.model.decoder.layers    
+    else:
+        blocks = model.model.layers
+    
+    
+    layers = [find_layers(blocks)]
+    prunables = []
+    for layer in layers:
+        for name in layer:
+            prunables.append(layer[name].weight.numel())
+
+    layer_num_in_block = int(len(prunables) / len(blocks))
+
+    metrics = np.load(f"{args.ww_metric_cache}/{args.ww_metric}.npy")
+    print("metrics ", metrics)
+    if args.mapping_type == 'block_wise':
+        block_metrics = [np.mean(metrics[i:i+layer_num_in_block]) for i in range(0, len(metrics), layer_num_in_block)]
+        metrics = [i for i in block_metrics for j in range(layer_num_in_block)]
+    
+    print("metric values:", metrics)
+            
+    scores = torch.tensor(metrics)
+    prunables = torch.tensor(prunables)
+
+    importance = np.array([4.9323,3.8395,2.7910,2.7910,1.3591,1.3591,1.3591,1.3591,1.3591,1.3591,1.3591,
+                           0.7273,0.7273,0.5882,0.5882,0.5882,0.4799,0.4049,0.4049,0.4049,0.3433,
+                           0.2895,0.2895,0.2895,0.2895,0.2895,0.2895,0.2895,0.2474,0.2381,0.2326,0.1301])
+    ww_importance = []
+    for i in importance:
+        for j in range(7):
+            ww_importance.append(i)
+    
+    adam_importance = []
+    for g_hill, a_hill in zip(ww_importance, metrics):
+        importance = (alpha * g_hill) / (np.sqrt(beta * a_hill) + epsilon)
+        adam_importance.append(importance)
+    I_min = np.min(adam_importance)
+    I_max = np.max(adam_importance)
+    norm_importance = (adam_importance - I_min) / (I_max - I_min + 1e-8)
+
+    # 反转：重要性高的层剪枝比例低，重要性低的层剪枝比例高
+    pre_ratio = 1 - norm_importance
+    avg_pre_ratio = np.mean(pre_ratio)
+
+    print("Adam-based importance ratios:", pre_ratio)
+    print("Average of Adam-based importance ratios:", avg_pre_ratio)
+
+    # 计算缩放因子，使全局剪枝率匹配 args.sparsity_ratio
+    target_avg = args.sparsity_ratio
+    scale_factor = target_avg / avg_pre_ratio
+    final_ratios_adam = pre_ratio * scale_factor
+    final_ratios_adam = np.clip(final_ratios_adam, 0.0, 0.99)
+
+    print("final", final_ratios_adam)
+    return final_ratios_adam
+
 def ww_sparsity_llama3_8b(args, model, device=torch.device("cuda:0"),
                          s1=0.8, s2=1.2, ratios=None, prune_n=0, prune_m=0,
                          weight_esd=0.5, eps=1e-8):
@@ -876,7 +936,7 @@ def prune_magnitude_ww2(args, model, tokenizer, device=torch.device("cuda:0"), p
     s1 = 1.0 - args.epsilon
     s2 = 1.0 + args.epsilon
     
-    all_layer_ratio = ww_sparsity_llama_7b(args, model, device, s1, s2)
+    all_layer_ratio = ww_sparsity_llama_7b_hill(args, model, device, s1, s2)
     # magnitude pruning
     prune_magnitude(args, model, tokenizer, device, ratios=all_layer_ratio)
     
@@ -893,7 +953,7 @@ def prune_wanda_ww2(args, model, tokenizer, device=torch.device("cuda:0"), prune
     s1 = 1.0 - args.epsilon
     s2 = 1.0 + args.epsilon
 
-    all_layer_ratio = ww_sparsity_llama_7b(args, model, device, s1, s2)
+    all_layer_ratio = ww_sparsity_llama_7b_hill(args, model, device, s1, s2)
     # wanda pruning
     prune_wanda(args, model, tokenizer, device, ratios=all_layer_ratio)   
     
@@ -909,6 +969,6 @@ def prune_sparsegpt_ww2(args, model, tokenizer, device=torch.device("cuda:0"), p
     s1 = 1.0 - args.epsilon
     s2 = 1.0 + args.epsilon
 
-    all_layer_ratio = ww_sparsity_llama_7b(args, model, device, s1, s2)
+    all_layer_ratio = ww_sparsity_llama_7b_hill(args, model, device, s1, s2)
     # sparsegpt pruning
     prune_sparsegpt(args, model, tokenizer, device, ratios=all_layer_ratio)
