@@ -153,7 +153,8 @@ def main():
     esd_values = compute_qk_esd(model)
     gradnorm_values = compute_vgoud_gradnorm(model)
     final_importance = compute_dynamic_importance(esd_values, gradnorm_values)
-    print("各层最终重要性评分: ", final_importance)
+    for layer in sorted(final_importance, key=lambda x: int(x)):
+        print(f"Layer {layer}: {final_importance[layer]}")
 
 if __name__ == "__main__":
     main()
