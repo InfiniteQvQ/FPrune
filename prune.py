@@ -488,15 +488,13 @@ def ww_sparsity_llama2_7b(args, model, device=torch.device("cuda:0"),
     return combined_ratios
 
 def ww_sparsity_llama_7b_hill(args, model, device=torch.device("cuda:0"),
-                         s1=0.8, s2=1.2, alpha=0.8, beta=0.999, epsilon=1e-8):
+                         s1=0.8, s2=1.2, alpha=0.2, beta=0.999, epsilon=1e-8):
     
-    # 选择 LLaMA 或 OPT 结构
     if "opt" in args.model:
         blocks = model.model.decoder.layers    
     else:
         blocks = model.model.layers
 
-    # 获取 transformer 层
     layers = [find_layers(blocks)]
     prunables = []
     for layer in layers:
@@ -505,18 +503,16 @@ def ww_sparsity_llama_7b_hill(args, model, device=torch.device("cuda:0"),
 
     layer_num_in_block = int(len(prunables) / len(blocks))
 
-    # 加载 ESD 指标
+    # 1️⃣ 计算 ESD 剪枝率
     metrics = np.load(f"{args.ww_metric_cache}/{args.ww_metric}.npy")
     print("ESD raw metrics:", metrics)
-    
-    # 按照 block-wise 进行 ESD 处理
+
     if args.mapping_type == 'block_wise':
         block_metrics = [np.mean(metrics[i:i+layer_num_in_block]) 
                          for i in range(0, len(metrics), layer_num_in_block)]
         metrics = [i for i in block_metrics for j in range(layer_num_in_block)]
     print("Processed ESD metrics:", metrics)
 
-    # 计算 ESD 剪枝比率
     scores = torch.tensor(metrics, dtype=torch.float32)
     prunables_tensor = torch.tensor(prunables, dtype=torch.float32)
     max_score, min_score = torch.max(scores), torch.min(scores)
@@ -525,7 +521,7 @@ def ww_sparsity_llama_7b_hill(args, model, device=torch.device("cuda:0"),
     layerwise_pruning_ratios_esd = (layerwise_pruning_ratios_esd * scaler).cpu().numpy().tolist()
     print("ESD-based pruning ratios:", layerwise_pruning_ratios_esd)
 
-    # 计算 GradNorm 重要性
+    # 2️⃣ 计算 GradNorm 重要性
     importance = np.array([
         0.3262, 0.2539, 0.1846, 0.1846, 0.0899, 0.0899, 0.0899, 0.0899,
         0.0899, 0.0899, 0.0899, 0.0481, 0.0481, 0.0389, 0.0389, 0.0389,
@@ -535,40 +531,28 @@ def ww_sparsity_llama_7b_hill(args, model, device=torch.device("cuda:0"),
     
     I_min, I_max = np.min(importance), np.max(importance)
     norm_importance = (importance - I_min) / (I_max - I_min)
-    pre_ratio = 1 - norm_importance
-    avg_pre_ratio = np.mean(pre_ratio)
-    print("Preliminary importance ratios:", pre_ratio)
+    avg_pre_ratio = np.mean(1 - norm_importance)
 
-    # 调整 GradNorm 剪枝比例，使其符合全局 sparsity_ratio
     scale_factor = args.sparsity_ratio / avg_pre_ratio
-    final_ratios_importance = np.clip(pre_ratio * scale_factor, 0.0, 0.99)
+    final_ratios_importance = np.clip((1 - norm_importance) * scale_factor, 0.0, 0.99)
 
-    # 扩展到每个 transformer 层
     importance_ratios_expanded = []
     for i in final_ratios_importance:
         for _ in range(layer_num_in_block):
             importance_ratios_expanded.append(i)
     print("Importance-based expanded ratios:", importance_ratios_expanded)
 
-    # ---------------------- 计算自适应加权 ----------------------
-    # 计算 ESD 和 GradNorm 的标准差
-    std_esd = np.std(layerwise_pruning_ratios_esd)
-    std_gradnorm = np.std(importance_ratios_expanded)
-
-    # 计算自适应权重（基于标准差）
-    w_esd = std_esd / (std_esd + std_gradnorm + 1e-8)  # 避免除零
-    w_gradnorm = std_gradnorm / (std_esd + std_gradnorm + 1e-8)
-    
-    print(f"Adaptive Weights: ESD={w_esd:.4f}, GradNorm={w_gradnorm:.4f}")
-
-    # 计算最终剪枝比率
-    combined_ratios = []
+    # 3️⃣ 只用 GradNorm 进行小幅修正
+    gradnorm_mean = np.mean(importance_ratios_expanded)
+    final_ratios = []
     for r_esd, r_imp in zip(layerwise_pruning_ratios_esd, importance_ratios_expanded):
-        combined = w_esd * r_esd + w_gradnorm * r_imp
-        combined_ratios.append(min(combined, 1.0))
+        correction_factor = 1 + alpha * (r_imp - gradnorm_mean)  # 只做微调
+        corrected_ratio = r_esd * correction_factor
+        corrected_ratio = min(corrected_ratio, 1.0)  # 保证不超过 1
+        final_ratios.append(corrected_ratio)
 
-    print("Final adaptive pruning ratios:", combined_ratios)
-    return combined_ratios
+    print("Final adjusted pruning ratios:", final_ratios)
+    return final_ratios
 
 def ww_sparsity_llama3_8b(args, model, device=torch.device("cuda:0"),
                          s1=0.8, s2=1.2, ratios=None, prune_n=0, prune_m=0,
