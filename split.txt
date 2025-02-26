@@ -52,6 +52,6 @@ wanda_ww 22.77 | 22.24 0.2 ww | 22.13 0.21 ww
 sparsegpt 19.67 | 18.49 0.2 ww |  GT-19.326
 
 llama 2 7b
-wanda_ww 30.1 0.25 ww | 32.05 GT 
+wanda_ww 30.1 0.25 ww | 32.05 GT | 29.62 split 0.3ww
 magnitdue_ww    2845 0.02 ww | nan GT 
 sparsegpt 20.99 0.2 ww | 21.51 GT
