@@ -534,7 +534,7 @@ def ww_sparsity_llama2_7b_split(args, model, device=torch.device("cuda:0"),
     min_score = torch.min(scores)
 
     # 线性映射到 [s1, s2]
-    layerwise_pruning_ratios_importance = (((max_score - scores) / (max_score - min_score)) * (args.s2 - args.s1) + args.s1)
+    layerwise_pruning_ratios_importance = (((max_score - scores) / (max_score - min_score)) * (s2 - s1) + s1)
 
     # 使用参数总量和全局目标剪枝率计算缩放因子，保证整体剪枝率符合目标
     scaler = torch.sum(prunables_tensor) * args.sparsity_ratio / (torch.sum(prunables_tensor * layerwise_pruning_ratios_importance))
