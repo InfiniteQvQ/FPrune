@@ -2,16 +2,20 @@ import torch
 import torch.nn as nn
 from transformers import AutoModelForCausalLM
 
-# ✅ 加载 LLaMA 7B 模型（从本地路径）
+# -----------------------------
+# 1. 加载 LLaMA 7B 模型（从本地路径）
+# -----------------------------
 cache_dir = "/root/autodl-tmp/llm_weights"
-model = AutoModelForCausalLM.from_pretrained("pinkmanlove/llama-7b-hf", 
-                                             cache_dir=cache_dir, device_map="auto", torch_dtype=torch.float16)
+model = AutoModelForCausalLM.from_pretrained("pinkmanlove/llama-7b-hf",
+                                             cache_dir=cache_dir,
+                                             device_map="auto",
+                                             torch_dtype=torch.float16)
 
+# -----------------------------
+# 辅助函数：从名称中提取层索引
+# 例如： "model.model.layers.0.self_attn.q_proj" 提取出 "0"
+# -----------------------------
 def get_layer_index(name):
-    """
-    从模块或参数名称中提取层索引
-    例如 "model.model.layers.0.self_attn.q_proj" 提取出 "0"
-    """
     parts = name.split(".")
     if "layers" in parts:
         idx = parts.index("layers")
@@ -19,52 +23,48 @@ def get_layer_index(name):
             return parts[idx + 1]
     return None
 
-# ================================
-# **步骤 1: 计算 Q/K 层的 Hessian (ESD)**
-# ================================
+# -----------------------------
+# 2. 计算 Q/K 层的 ESD（Hessian 重要性）
+# -----------------------------
 def compute_qk_esd(model):
-    """ 计算每层 Q/K 层的 Hessian (ESD) 重要性，返回格式：{layer_index: {"q_proj": value, "k_proj": value}} """
+    """
+    计算每层 Q/K 层的 ESD，返回字典格式：
+      { layer_index: {"q_proj": esd_value, "k_proj": esd_value} }
+    说明：
+      - 由于对小于1的数取 log10 后结果为负，因此这里用 -ESD 表示重要性，
+        数值越大代表越重要。
+    """
     esd_values = {}
-
     for name, module in model.named_modules():
         if "q_proj" in name or "k_proj" in name:
             layer_index = get_layer_index(name)
             if layer_index is None:
                 continue
-            # 初始化该层的字典
             if layer_index not in esd_values:
                 esd_values[layer_index] = {}
-            # 根据名称确定是 q_proj 还是 k_proj
-            if "q_proj" in name:
-                proj_type = "q_proj"
-            elif "k_proj" in name:
-                proj_type = "k_proj"
-            else:
-                continue
-
+            proj_type = "q_proj" if "q_proj" in name else "k_proj"
             # 复制权重并转为 float32
             matrix = module.weight.data.clone().cpu().to(torch.float32)
             # 计算奇异值平方
             eigs = torch.square(torch.linalg.svdvals(matrix).flatten())
-            spectral_norm = eigs[-1].item()
+            spectral_norm = eigs[-1].item()  # 取最后一个奇异值的平方
+            # 计算 alpha（公式可根据需要调整）
             log_nz_eigs = torch.log(eigs)
-            # 计算 alpha（注意：这里的公式可能需要根据实际需求调整）
             alpha = 1 + len(eigs) / (torch.sum(log_nz_eigs) - len(eigs) * log_nz_eigs[0])
-            esd_value = alpha.item() * torch.log10(torch.tensor(spectral_norm)).item()
-            esd_values[layer_index][proj_type] = esd_value
-
+            esd = alpha.item() * torch.log10(torch.tensor(spectral_norm)).item()
+            esd_values[layer_index][proj_type] = esd
     print("ESD 计算完成: ", esd_values)
     return esd_values
 
-# ================================
-# **步骤 2: 计算 V, Output, Gate, Up, Down 层的 GradNorm**
-# ================================
+# -----------------------------
+# 3. 计算 V、Output、Gate、Up、Down 层的 GradNorm
+# -----------------------------
 def compute_vgoud_gradnorm(model):
-    """ 计算每层 V, Output, Gate, Up, Down 层的 GradNorm 重要性，返回格式：
-        {layer_index: {"v_proj": value, "o_proj": value, "gate_proj": value, "up_proj": value, "down_proj": value}} 
+    """
+    计算每层 V, Output, Gate, Up, Down 层的 GradNorm 重要性，返回字典格式：
+      { layer_index: {"v_proj": val, "o_proj": val, "gate_proj": val, "up_proj": val, "down_proj": val} }
     """
     gradnorm_values = {}
-
     for name, param in model.named_parameters():
         if any(proj in name for proj in ["v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]):
             layer_index = get_layer_index(name)
@@ -72,7 +72,6 @@ def compute_vgoud_gradnorm(model):
                 continue
             if layer_index not in gradnorm_values:
                 gradnorm_values[layer_index] = {}
-            # 确定投影类型
             if "v_proj" in name:
                 proj_type = "v_proj"
             elif "o_proj" in name:
@@ -85,67 +84,76 @@ def compute_vgoud_gradnorm(model):
                 proj_type = "down_proj"
             else:
                 continue
-
-            gradnorm_val = torch.norm(param.data, p=2).item()
-            gradnorm_values[layer_index][proj_type] = gradnorm_val
-
+            gradnorm_values[layer_index][proj_type] = torch.norm(param.data, p=2).item()
     print("GradNorm 计算完成: ", gradnorm_values)
     return gradnorm_values
 
-# ================================
-# **步骤 3: 计算动态剪枝权重**
-# ================================
-def compute_dynamic_weights(esd_values, gradnorm_values):
+# -----------------------------
+# 4. 动态计算最终每层的重要性评分
+# -----------------------------
+def compute_dynamic_importance(esd_values, gradnorm_values, eps=1e-8):
     """
-    计算全局动态剪枝权重
-    lambda_qk: 基于所有层 Q/K 的 ESD 之和
-    lambda_vgoud: 基于所有层 V/Gate/Up/Down 的 GradNorm 之和
+    利用动态方法计算每层的重要性评分。
+    处理步骤：
+      a. 对 Q/K 部分：将 ESD 取相反数 (-ESD)，并对 q_proj 与 k_proj 取平均，得到 importance_qk。
+      b. 对其他部分：对每个 GradNorm 取对数后平均，得到 importance_grad。
+      c. 动态权重：对所有层分别求和得到全局 importance_qk 和 importance_grad，
+         动态计算 lambda_qk = total_qk / (total_qk + total_grad)， lambda_grad 同理。
+      d. 最终每层重要性：final_importance = lambda_qk * importance_qk_layer + lambda_grad * importance_grad_layer
+    返回：
+      - final_importance: { layer_index: final_importance_value }
     """
-    esd_list = [val for layer in esd_values.values() for val in layer.values()]
-    gradnorm_list = [val for layer in gradnorm_values.values() for val in layer.values()]
+    final_importance = {}
+    importance_qk_dict = {}   # 每层 Q/K 重要性（正值，数值越大表示越重要）
+    importance_grad_dict = {} # 每层 GradNorm 重要性（取 log 后的平均值）
 
-    esd_sum = sum(esd_list) if esd_list else 1e-8
-    gradnorm_sum = sum(gradnorm_list) if gradnorm_list else 1e-8
+    # 收集所有层（可能部分层只有 Q/K 或只有 GradNorm）
+    layers = set(list(esd_values.keys()) + list(gradnorm_values.keys()))
+    for layer in layers:
+        # 处理 Q/K 部分
+        if layer in esd_values:
+            esd_layer = esd_values[layer]
+            if "q_proj" in esd_layer and "k_proj" in esd_layer:
+                imp_qk = - (esd_layer["q_proj"] + esd_layer["k_proj"]) / 2.0
+            elif "q_proj" in esd_layer:
+                imp_qk = - esd_layer["q_proj"]
+            elif "k_proj" in esd_layer:
+                imp_qk = - esd_layer["k_proj"]
+            else:
+                imp_qk = 0.0
+        else:
+            imp_qk = 0.0
+        importance_qk_dict[layer] = imp_qk
 
-    lambda_qk = esd_sum / (esd_sum + gradnorm_sum)
-    lambda_vgoud = gradnorm_sum / (esd_sum + gradnorm_sum)
+        # 处理 GradNorm 部分，对每个数值取 log 并平均
+        if layer in gradnorm_values:
+            grad_vals = gradnorm_values[layer].values()
+            grad_logs = [torch.log(torch.tensor(val, dtype=torch.float32) + eps).item() for val in grad_vals]
+            imp_grad = sum(grad_logs) / len(grad_logs)
+        else:
+            imp_grad = 0.0
+        importance_grad_dict[layer] = imp_grad
 
-    print(f"Q/K 剪枝权重: {lambda_qk}, V/Gate/Up/Down 剪枝权重: {lambda_vgoud}")
-    return lambda_qk, lambda_vgoud
+    # 动态计算全局权重
+    total_qk = sum(importance_qk_dict.values())
+    total_grad = sum(importance_grad_dict.values())
+    lambda_qk = total_qk / (total_qk + total_grad + eps)
+    lambda_grad = total_grad / (total_qk + total_grad + eps)
+    print("动态权重: lambda_qk = ", lambda_qk, ", lambda_grad = ", lambda_grad)
 
-# ================================
-# **步骤 4: 计算剪枝评分**
-# ================================
-def compute_layer_pruning_score(model):
-    """ 计算 Transformer 结构中每层的剪枝评分，评分 = 动态权重 * exp(对应层的重要性) """
+    # 计算最终每层的重要性评分
+    for layer in layers:
+        final_importance[layer] = lambda_qk * importance_qk_dict[layer] + lambda_grad * importance_grad_dict[layer]
+    return final_importance
+
+# -----------------------------
+# 5. 主函数：运行全部计算
+# -----------------------------
+def main():
     esd_values = compute_qk_esd(model)
     gradnorm_values = compute_vgoud_gradnorm(model)
-    lambda_qk, lambda_vgoud = compute_dynamic_weights(esd_values, gradnorm_values)
+    final_importance = compute_dynamic_importance(esd_values, gradnorm_values)
+    print("各层最终重要性评分: ", final_importance)
 
-    pruning_scores = {}
-
-    # 针对 Q/K 层
-    for layer, proj_dict in esd_values.items():
-        if layer not in pruning_scores:
-            pruning_scores[layer] = {}
-        for proj, val in proj_dict.items():
-            # 使用 torch.exp 计算指数变换
-            score = lambda_qk * torch.exp(torch.tensor(val, dtype=torch.float32))
-            pruning_scores[layer][proj] = score.item()
-
-    # 针对 V, Output, Gate, Up, Down 层
-    for layer, proj_dict in gradnorm_values.items():
-        if layer not in pruning_scores:
-            pruning_scores[layer] = {}
-        for proj, val in proj_dict.items():
-            score = lambda_vgoud * torch.exp(torch.tensor(val, dtype=torch.float32))
-            pruning_scores[layer][proj] = score.item()
-
-    return pruning_scores
-
-# ================================
-# **步骤 6: 运行剪枝**
-# ================================
-# 计算剪枝评分
-pruning_scores = compute_layer_pruning_score(model)
-print("各层剪枝评分: ", pruning_scores)
+if __name__ == "__main__":
+    main()
