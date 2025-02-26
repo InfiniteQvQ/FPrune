@@ -1,0 +1,57 @@
+ seg_id=0, layers=[0]
+  seg_id=1, layers=[1]
+  seg_id=2, layers=[2]
+  seg_id=3, layers=[3, 4, 5, 6]
+  seg_id=4, layers=[7, 8, 9, 10, 11, 12]
+  seg_id=5, layers=[13]
+  seg_id=6, layers=[14]
+  seg_id=7, layers=[15, 16]
+  seg_id=8, layers=[17, 18]
+  seg_id=9, layers=[19, 20, 21, 22]
+  seg_id=10, layers=[23, 24]
+  seg_id=11, layers=[25]
+  seg_id=12, layers=[26]
+  seg_id=13, layers=[27]
+
+
+
+Segment 0: importance=5.4375
+Segment 1: importance=2.1562
+Segment 2: importance=1.5625
+Segment 3: importance=0.8836
+Segment 4: importance=0.3727
+Segment 5: importance=0.2061
+Segment 6: importance=0.1548
+Segment 7: importance=0.1237
+Segment 8: importance=0.1138
+Segment 9: importance=0.1011
+Segment 10: importance=0.1016
+Segment 11: importance=0.1069
+Segment 12: importance=0.0557
+Segment 13: importance=0.0415
+
+Segment 0: importance=16.8750
+Segment 1: importance=8.9688
+Segment 2: importance=3.8203
+Segment 3: importance=2.5078
+Segment 4: importance=2.2188
+Segment 5: importance=1.7943
+Segment 6: importance=1.5469
+Segment 7: importance=1.4453
+Segment 8: importance=1.2474
+Segment 9: importance=0.7959
+Segment 10: importance=0.5078
+Segment 11: importance=0.3516
+Segment 12: importance=0.1592
+Segment 13: importance=0.1187
+
+
+llama 7b
+magnitude_ww 192.69 
+wanda_ww 22.77 | 22.24 0.2 ww | 22.13 0.21 ww
+sparsegpt 19.67 | 18.49 0.2 ww |  GT-19.326
+
+llama 2 7b
+wanda_ww 30.1 0.25 ww | 32.05 GT 
+magnitdue_ww    2845 0.02 ww | nan GT 
+sparsegpt 20.99 0.2 ww | 21.51 GT
