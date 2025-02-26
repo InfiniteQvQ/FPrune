@@ -91,26 +91,25 @@ def compute_vgoud_gradnorm(model):
 # -----------------------------
 # 4. 动态计算最终每层的重要性评分
 # -----------------------------
-def compute_dynamic_importance(esd_values, gradnorm_values, eps=1e-8):
+def compute_dynamic_importance(esd_values, gradnorm_values, eps=1e-8, qk_multiplier=1.5):
     """
     利用动态方法计算每层的重要性评分。
     处理步骤：
-      a. 对 Q/K 部分：将 ESD 取相反数 (-ESD)，并对 q_proj 与 k_proj 取平均，得到 importance_qk。
-      b. 对其他部分：对每个 GradNorm 取对数后平均，得到 importance_grad。
-      c. 动态权重：对所有层分别求和得到全局 importance_qk 和 importance_grad，
+      a. 对 Q/K 部分：将 ESD 取相反数 (-ESD)，并对 q_proj 与 k_proj 取平均，再乘以 qk_multiplier（增大Q/K权重），得到 importance_qk。
+      b. 对 GradNorm 部分：对每个 GradNorm 取对数后平均，得到 importance_grad，然后在所有层内归一化到 [0,1]。
+      c. 动态权重：先计算所有层的 importance_qk 与 importance_grad 的全局和，
          动态计算 lambda_qk = total_qk / (total_qk + total_grad)， lambda_grad 同理。
       d. 最终每层重要性：final_importance = lambda_qk * importance_qk_layer + lambda_grad * importance_grad_layer
     返回：
       - final_importance: { layer_index: final_importance_value }
     """
     final_importance = {}
-    importance_qk_dict = {}   # 每层 Q/K 重要性（正值，数值越大表示越重要）
-    importance_grad_dict = {} # 每层 GradNorm 重要性（取 log 后的平均值）
+    importance_qk_dict = {}   # 每层 Q/K 重要性（数值越大表示越重要）
+    importance_grad_dict = {} # 每层 GradNorm 重要性（经过对数和归一化后）
 
-    # 收集所有层（可能部分层只有 Q/K 或只有 GradNorm）
     layers = set(list(esd_values.keys()) + list(gradnorm_values.keys()))
+    # 先计算 Q/K 重要性
     for layer in layers:
-        # 处理 Q/K 部分
         if layer in esd_values:
             esd_layer = esd_values[layer]
             if "q_proj" in esd_layer and "k_proj" in esd_layer:
@@ -123,23 +122,33 @@ def compute_dynamic_importance(esd_values, gradnorm_values, eps=1e-8):
                 imp_qk = 0.0
         else:
             imp_qk = 0.0
-        importance_qk_dict[layer] = imp_qk
+        # 增加 Q/K 权重
+        importance_qk_dict[layer] = qk_multiplier * imp_qk
 
-        # 处理 GradNorm 部分，对每个数值取 log 并平均
+    # 计算 GradNorm 重要性：先取对数再求平均
+    temp_grad = {}
+    for layer in layers:
         if layer in gradnorm_values:
             grad_vals = gradnorm_values[layer].values()
             grad_logs = [torch.log(torch.tensor(val, dtype=torch.float32) + eps).item() for val in grad_vals]
-            imp_grad = sum(grad_logs) / len(grad_logs)
+            temp_grad[layer] = sum(grad_logs) / len(grad_logs)
         else:
-            imp_grad = 0.0
-        importance_grad_dict[layer] = imp_grad
+            temp_grad[layer] = 0.0
+
+    # 对所有层的 gradnorm 值归一化到 [0,1]
+    grad_list = list(temp_grad.values())
+    min_grad = min(grad_list)
+    max_grad = max(grad_list)
+    for layer in layers:
+        # 归一化公式
+        importance_grad_dict[layer] = (temp_grad[layer] - min_grad) / (max_grad - min_grad + eps)
 
     # 动态计算全局权重
     total_qk = sum(importance_qk_dict.values())
     total_grad = sum(importance_grad_dict.values())
     lambda_qk = total_qk / (total_qk + total_grad + eps)
     lambda_grad = total_grad / (total_qk + total_grad + eps)
-    print("动态权重: lambda_qk = ", lambda_qk, ", lambda_grad = ", lambda_grad)
+    print("动态权重: lambda_qk =", lambda_qk, ", lambda_grad =", lambda_grad)
 
     # 计算最终每层的重要性评分
     for layer in layers:
@@ -152,8 +161,10 @@ def compute_dynamic_importance(esd_values, gradnorm_values, eps=1e-8):
 def main():
     esd_values = compute_qk_esd(model)
     gradnorm_values = compute_vgoud_gradnorm(model)
-    final_importance = compute_dynamic_importance(esd_values, gradnorm_values)
+    final_importance = compute_dynamic_importance(esd_values, gradnorm_values, qk_multiplier=1.5)
+    # 按层号顺序输出（假设层索引是数字形式的字符串）
     final_importance_list = [final_importance[layer] for layer in sorted(final_importance, key=lambda x: int(x))]
+    print("各层最终重要性评分（按层排序）:")
     print(final_importance_list)
 
 if __name__ == "__main__":
