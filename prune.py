@@ -500,35 +500,51 @@ def ww_sparsity_llama2_7b_split(args, model, device=torch.device("cuda:0"),
                            6.173619372565943, 5.986921233178075, 5.403346397020093, 6.6686178681750645, 
                            5.577086070240585, 5.713638849702697, 5.4988488314448585, 6.422211427152669])
 
-    # 线性映射步骤
-    # 1. 对 importance 做归一化，将数值映射到 [0,1]
-    I_min = np.min(importance)
-    I_max = np.max(importance)
-    norm_importance = (importance - I_min) / (I_max - I_min)
+    if "opt" in args.model:
+        blocks = model.model.decoder.layers    
+    else:
+        blocks = model.model.layers
 
-    # 2. 反转：归一化后数值越大，表示重要性越高，
-    #    为了使重要性高的层剪枝比例越低，我们取 1 - norm_importance
-    pre_ratio = 1 - norm_importance
+    # 得到待剪枝层字典，假设 find_layers 返回的顺序与 transformer 层顺序一致，
+    # 每个 transformer 层内有7个子层
+    layers = [find_layers(blocks)]
+    prunables = []
+    for layer in layers:
+        for name in layer:
+            prunables.append(layer[name].weight.numel())
+    layer_num_in_block = int(len(prunables) / len(blocks))
 
-    # 3. 计算全局平均值，并用全局目标剪枝率调整映射
-    #    假设 args.sparsity_ratio 代表全局目标剪枝率（例如 0.5）
-    avg_pre_ratio = np.mean(pre_ratio)
-    target_avg = args.sparsity_ratio  # 全局目标剪枝率
-    scale_factor = target_avg / (avg_pre_ratio + 1e-8)  # 避免除零
-    final_ratios_importance = pre_ratio * scale_factor
+    # -----------------------------
+    # 1. 扩展 importance 数组到每个子层（即每个 transformer 层的指标重复 layer_num_in_block 次）
+    # -----------------------------
+    importance_expanded = []
+    for imp in importance:
+        for _ in range(layer_num_in_block):
+            importance_expanded.append(imp)
+    # 此时 importance_expanded 长度应为 32 * layer_num_in_block
 
-    # 4. 限制每层剪枝率最大不超过0.99
-    final_ratios_importance = np.clip(final_ratios_importance, 0.0, 0.99)
-    print("Mapped importance-based pruning ratios per layer:", final_ratios_importance)
+    # -----------------------------
+    # 2. 利用与 ESD 映射相同的线性映射方式将 importance 映射到 [s1, s2] 区间
+    # 并根据全局目标剪枝率和各层参数数量进行缩放
+    # -----------------------------
+    scores = torch.tensor(importance_expanded, dtype=torch.float32)
+    prunables_tensor = torch.tensor(prunables, dtype=torch.float32)
 
-    # 5. 如果每个 transformer 层内有多个子层（例如每层有 layer_num_in_block 个子层），扩展每层的剪枝率
-    layer_num_in_block = 7  # 举例：每个 transformer 层内有7个子层
-    importance_ratios_expanded = []
-    for ratio in final_ratios_importance:
-        importance_ratios_expanded.extend([ratio] * layer_num_in_block)
+    max_score = torch.max(scores)
+    min_score = torch.min(scores)
 
-    print("Expanded importance-based pruning ratios:", importance_ratios_expanded)
-    return importance_ratios_expanded
+    # 线性映射到 [s1, s2]
+    layerwise_pruning_ratios_importance = (((scores - min_score) / (max_score - min_score)) * (s2 - s1) + s1)
+
+    # 使用参数总量和全局目标剪枝率计算缩放因子，保证整体剪枝率符合目标
+    scaler = torch.sum(prunables_tensor) * args.sparsity_ratio / (torch.sum(prunables_tensor * layerwise_pruning_ratios_importance))
+    layerwise_pruning_ratios_importance = layerwise_pruning_ratios_importance * scaler
+
+    final_importance_ratios = layerwise_pruning_ratios_importance.cpu().numpy().tolist()
+
+    print("Mapped importance-based pruning ratios per sub-layer (ordered by layer):")
+    print(final_importance_ratios)
+    return final_importance_ratios
 
 
 
