@@ -558,7 +558,7 @@ def ww_sparsity_llama2_7b_split(args, model, device=torch.device("cuda:0"),
     return layer_component_ratios
 
 
-def compute_smoothgrad_fisher(model, dataloader, device, num_samples=10, noise_scale=0.01):
+def compute_smoothgrad_fisher(model, dataloader, device=torch.device("cuda:0"), num_samples=10, noise_scale=0.01):
     """ 使用 SmoothGrad 计算 Q, K, V, Out, Gate, Up, Down 的 Fisher 信息 """
     fisher_info = {layer_idx: {"Q": 0, "K": 0, "V": 0, "Out": 0, "Gate": 0, "Up": 0, "Down": 0} 
                    for layer_idx in range(len(model.model.layers))}
