@@ -1,5 +1,4 @@
 import torch
-import torch.nn as nn
 from transformers import AutoModelForCausalLM
 
 # -----------------------------
@@ -12,89 +11,120 @@ model = AutoModelForCausalLM.from_pretrained(
     device_map="auto",
     torch_dtype=torch.float16
 )
+model.eval()
 
 # -----------------------------
-# 辅助函数：从模块名称中提取层索引
-# 例如："model.model.layers.0.self_attn.q_proj" 提取出 "0"
+# 2. 构造一个 dummy input
 # -----------------------------
-def get_layer_index(name):
-    parts = name.split(".")
-    if "layers" in parts:
-        idx = parts.index("layers")
-        if idx + 1 < len(parts):
-            return parts[idx + 1]
-    return None
+# 生成一个 [batch_size, seq_length] 的随机 token id 张量，范围 [0, vocab_size)
+# 注意：模型配置中应有 vocab_size 属性
+input_ids = torch.randint(0, model.config.vocab_size, (1, 16)).to(model.device)
 
 # -----------------------------
-# 2. 计算 Q/K 层的 ESD
+# 3. 前向传播并计算损失
 # -----------------------------
-def compute_qk_esd(model, eps=1e-8):
-    """
-    遍历模型中所有 q_proj 或 k_proj 模块，计算其 ESD 值。
-    返回格式： { layer_index: {"q_proj": esd_value, "k_proj": esd_value} }
-    注意：如果权重张量维度小于2（例如偏置），则跳过计算。
-    """
-    esd_values = {}
-    for name, module in model.named_modules():
-        
-            layer_index = get_layer_index(name)
-            if layer_index is None:
-                continue
-            if layer_index not in esd_values:
-                esd_values[layer_index] = {}
-            proj_type = "q_proj" if "q_proj" in name else "k_proj"
-            matrix = module.weight.data.clone().cpu().to(torch.float32)
-            if matrix.ndim < 2:
-                continue  # 跳过非二维张量
-            # 计算奇异值，再取平方
-            eigs = torch.square(torch.linalg.svdvals(matrix).flatten())
-            spectral_norm = eigs[-1].item()  # 取最后一个奇异值（平方后）
-            log_nz_eigs = torch.log(eigs + eps)
-            # 计算一个 alpha 参数，公式可调整
-            alpha = 1 + len(eigs) / (torch.sum(log_nz_eigs) - len(eigs) * log_nz_eigs[0])
-            esd = alpha.item() * torch.log10(torch.tensor(spectral_norm) + eps).item()
-            esd_values[layer_index][proj_type] = esd
-    print("ESD computed for Q/K:", esd_values)
-    return esd_values
+# 对于因果语言模型，我们可以使用 labels=input_ids 计算交叉熵损失
+output = model(input_ids=input_ids, labels=input_ids)
+loss = output.loss
 
 # -----------------------------
-# 3. 仅基于 Q/K 计算每层的重要性
+# 4. 定义辅助函数：获取层参数、计算 Hessian Trace（使用 Hutchinson 方法）和梯度范数
 # -----------------------------
-def compute_qk_importance(model, qk_multiplier=1.0):
+def get_layer_parameters(layer):
+    return [p for p in layer.parameters() if p.requires_grad]
+
+def compute_hessian_trace(layer, loss, n_samples=1, eps=1e-2):
     """
-    利用 compute_qk_esd 计算每层 q_proj 与 k_proj 的 ESD，
-    对于每一层，将 q_proj 与 k_proj 的 ESD 取平均，
-    并取负（因为 ESD 数值越低表示重要性越高），再乘以 qk_multiplier。
-    返回格式： { layer_index: importance }
+    利用 Hutchinson 方法计算该层参数的 Hessian Trace 近似值：
+        Tr(H) ≈ E[ v^T H v ]
+    其中 v 为随机向量（这里采用高斯分布）。
     """
-    esd_values = compute_qk_esd(model)
-    importance = {}
-    for layer, proj_dict in esd_values.items():
-        values = []
-        if "q_proj" in proj_dict:
-            values.append(proj_dict["q_proj"])
-        if "k_proj" in proj_dict:
-            values.append(proj_dict["k_proj"])
-        if values:
-            avg_esd = sum(values) / len(values)
-            importance[layer] = -avg_esd * qk_multiplier
-    return importance
+    params = get_layer_parameters(layer)
+    if not params:
+        return 0.0
+    trace_estimates = []
+    for _ in range(n_samples):
+        vs = [torch.randn_like(p) for p in params]
+        # 计算梯度，保持计算图
+        grad_params = torch.autograd.grad(loss, params, create_graph=True, retain_graph=True)
+        # 计算点积：sum_i <grad_i, v_i>
+        dot = sum(torch.sum(g * v) for g, v in zip(grad_params, vs))
+        # 计算 Hessian-Vector 产品：H v = grad(dot)
+        hvps = torch.autograd.grad(dot, params, retain_graph=True)
+        # 计算 v^T H v：累加所有参数的 v_i * (H v)_i
+        hvp_dot = sum(torch.sum(v * hvp) for v, hvp in zip(vs, hvps))
+        trace_estimates.append(hvp_dot.item())
+    return sum(trace_estimates) / len(trace_estimates)
+
+def compute_gradient_norm(layer, loss):
+    """
+    计算该层所有参数的梯度范数（L2），并取和。
+    """
+    params = get_layer_parameters(layer)
+    if not params:
+        return 0.0
+    grad_params = torch.autograd.grad(loss, params, retain_graph=True)
+    norm = sum(torch.norm(g, p=2).item() for g in grad_params)
+    return norm
 
 # -----------------------------
-# 4. 主函数：计算并按层输出重要性
+# 5. 针对每个 Transformer 层计算 Hessian Trace 和梯度范数
 # -----------------------------
-def main():
-    # 这里 qk_multiplier 可以调节 Q/K 权重（默认设为 1.0，可根据需要调整）
-    for name, module in model.model.layers[0].named_modules():
-        if any(x in name for x in ["q_proj", "k_proj", "v_proj", "gate_proj", "o_proj", "up_proj", "down_proj"]):
-            print(name)
-    importance = compute_qk_importance(model, qk_multiplier=1.0)
+hessian_scores = {}
+gradnorm_scores = {}
+
+# 假设 Transformer 层存放在 model.model.layers
+for i, layer in enumerate(model.model.layers):
+    ht = compute_hessian_trace(layer, loss, n_samples=1, eps=1e-2)
+    gn = compute_gradient_norm(layer, loss)
+    hessian_scores[str(i)] = ht
+    gradnorm_scores[str(i)] = gn
+
+print("Hessian scores per layer:", hessian_scores)
+print("Gradient norm scores per layer:", gradnorm_scores)
+
+# -----------------------------
+# 6. 对两个指标归一化
+# -----------------------------
+def normalize_dict(d, eps=1e-8):
+    values = list(d.values())
+    min_val = min(values)
+    max_val = max(values)
+    norm = {k: (v - min_val) / (max_val - min_val + eps) for k, v in d.items()}
+    return norm
+
+norm_hessian = normalize_dict(hessian_scores)
+norm_gradnorm = normalize_dict(gradnorm_scores)
+
+print("Normalized Hessian scores:", norm_hessian)
+print("Normalized Gradient Norm scores:", norm_gradnorm)
+
+# -----------------------------
+# 7. 融合一阶和二阶信息生成最终重要性分数
+# -----------------------------
+# alpha 控制 Hessian 信息的权重，建议取 0.7（可根据验证结果调整）
+alpha = 0.7
+importance_scores = {}
+for k in norm_hessian.keys():
+    # 重要性分数 = alpha * (归一化 Hessian) + (1 - alpha) * (归一化梯度)
+    importance_scores[k] = alpha * norm_hessian[k] + (1 - alpha) * norm_gradnorm[k]
+
+print("Final importance scores per layer:")
+for k in sorted(importance_scores, key=lambda x: int(x)):
+    print(f"Layer {k}: {importance_scores[k]:.4f}")
+
+# -----------------------------
+# 8. (可选) 根据层重要性生成剪枝比例
+# -----------------------------
+# 假设全局剪枝率为 p_base（例如60%），重要性越高的层剪枝比例应越低
+p_base = 0.6
+pruning_ratios = {}
+for k, imp in importance_scores.items():
+    # 可以简单设置剪枝比例为： p_i = p_base * (1 - importance)
+    pruning_ratios[k] = p_base * (1 - importance_scores[k])
     
+print("Suggested per-layer pruning ratios:")
+for k in sorted(pruning_ratios, key=lambda x: int(x)):
+    print(f"Layer {k}: {pruning_ratios[k]:.4f}")
 
-    # 假设层索引为数字字符串，按数值从小到大排序输出
-    #sorted_importance = [importance[layer] for layer in sorted(importance, key=lambda x: int(x))]
-    #print("Importance per layer (based solely on Q/K):")
-    #print(sorted_importance)
-
-if __name__ == "__main__":
-    main()
+# 以上重要性分数和剪枝比例可以作为 SparseGPT、Wanda 等剪枝方法的输入指导剪枝决策。
