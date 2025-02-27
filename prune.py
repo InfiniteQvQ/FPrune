@@ -488,119 +488,134 @@ def ww_sparsity_llama2_7b(args, model, device=torch.device("cuda:0"),
     return combined_ratios
 
 def ww_sparsity_llama2_7b_split(args, model, device=torch.device("cuda:0"),
-                         s1=0.8, s2=1.2, ratios=None, prune_n=0, prune_m=0,
-                         weight_esd=0.8, eps=1e-8):
+                                s1=0.8, s2=1.2, ratios=None, prune_n=0, prune_m=0,
+                                weight_esd=0.8, eps=1e-8):
+    """ 计算 LLaMA 7B 各层的 Q, K, V, Out, Gate, Up, Down 剪枝比例 """
+    
     if "opt" in args.model:
         blocks = model.model.decoder.layers    
     else:
         blocks = model.model.layers
 
-    # 得到待剪枝层字典，假设 find_layers 返回的顺序与 transformer 层顺序一致，
-    # 每个 transformer 层内有7个子层
+    # 获取 Transformer 层
     layers = [find_layers(blocks)]
     prunables = []
     for layer in layers:
         for name in layer:
             prunables.append(layer[name].weight.numel())
+
     layer_num_in_block = int(len(prunables) / len(blocks))
-    
-    # 加载ESD指标
+
+    # **加载 ESD 指标**
     metrics = np.load(f"{args.ww_metric_cache}/{args.ww_metric}.npy")
     print("ESD raw metrics:", metrics)
+
     if args.mapping_type == 'block_wise':
         block_metrics = [np.mean(metrics[i:i+layer_num_in_block]) 
                          for i in range(0, len(metrics), layer_num_in_block)]
         metrics = [i for i in block_metrics for j in range(layer_num_in_block)]
-    print("ESD metric values after block_wise processing:", metrics)
+
     metrics = np.array(metrics)
     esd_matrix = metrics.reshape((32, 7))
+
+    # **按 block 进行分区**
     segmentation = {
-        0: [0],
-        1: [1],
-        2: [2, 3],
-        3: [4, 5, 6, 7, 8, 9, 10],
-        4: [11, 12],
-        5: [13, 14, 15],
-        6: [16],
-        7: [17, 18, 19],
-        8: [20],
-        9: [21, 22, 23, 24, 25, 26, 27],
-        10: [28],
-        11: [29],
-        12: [30],
-        13: [31]
+        0: [0], 1: [1], 2: [2, 3], 3: [4, 5, 6, 7, 8, 9, 10],
+        4: [11, 12], 5: [13, 14, 15], 6: [16], 7: [17, 18, 19],
+        8: [20], 9: [21, 22, 23, 24, 25, 26, 27], 10: [28], 11: [29], 12: [30], 13: [31]
     }
 
-    # 初始化结果矩阵
+    # **计算 Block 内平均 ESD**
     result_matrix = np.zeros_like(esd_matrix)
-
-    # 对每个分组计算平均值，并赋值到该分组所有层
     for seg_id in sorted(segmentation.keys()):
         layers = segmentation[seg_id]
-        # 提取该组所有层的ESD数值，形状为 (len(layers), 7)
         seg_values = esd_matrix[layers, :]
-        # 计算该组内所有数值的平均值
         seg_avg = np.mean(seg_values)
-        # 将平均值赋给该组所有层（每行的所有7个数值）
         result_matrix[layers, :] = seg_avg
 
-    # 如果需要将结果转为1D列表（长度224），可以展平矩阵
+    # **转换为 1D ESD 评分**
     final_esd = result_matrix.flatten()
-    print("Block-level averaged ESD scores (flattened):")
-    
     scores = torch.tensor(final_esd)
     prunables = torch.tensor(prunables)
 
-    # linear mapping
+    # **线性映射 ESD 评分**
     max_score = torch.max(scores)
     min_score = torch.min(scores)
-    
     layerwise_pruning_ratios = (((scores - min_score) / (max_score - min_score)) * (s2 - s1) + s1)
     scaler = torch.sum(prunables) * args.sparsity_ratio / (torch.sum(prunables * layerwise_pruning_ratios))  
     layerwise_pruning_ratios = layerwise_pruning_ratios * scaler
     layerwise_pruning_ratios = layerwise_pruning_ratios.cpu().numpy().tolist()
-    print("ratio: ")
-    print(layerwise_pruning_ratios)
-    #layerwise_pruning_ratios = np.clip(layerwise_pruning_ratios, 0.0, 1.0)
-    #print(layerwise_pruning_ratios, " new ratio")
+
+    print("Layer-wise pruning ratios:", layerwise_pruning_ratios)
+
+    # **计算 QKV+Out+Gate+Up+Down 重要性**
+    fisher_info = compute_fisher_info(model, device)
+    grad_norms = compute_gradient_norm(model)
     
-    importance = np.array([0.3262, 0.2539,0.1846, 0.1846,0.0899,0.0899,0.0899,0.0899,0.0899,0.0899,0.0899,0.0481,0.0481,
-                       0.0389,0.0389,0.0389,0.0317,0.0268,0.0268,0.0268,0.0227,0.0191,0.0191,0.0191,0.0191,
-                       0.0191,0.0191,0.0191,0.0164,0.0157,0.0154,0.0086])
-    I_min = np.min(importance)
-    I_max = np.max(importance)
-    norm_importance = (importance - I_min) / (I_max - I_min)
-    # 反转：重要性越高（数值大）希望剪枝比例越低
-    pre_ratio = 1 - norm_importance
-    avg_pre_ratio = np.mean(pre_ratio)
-    print("Preliminary importance ratios:", pre_ratio)
-    print("Average of importance preliminary ratios:", avg_pre_ratio)
-    target_avg = args.sparsity_ratio  # 这里假设 args.sparsity_ratio 代表全局目标剪枝率（例如0.5）
-    scale_factor = target_avg / avg_pre_ratio
-    final_ratios_importance = pre_ratio * scale_factor
-    final_ratios_importance = np.clip(final_ratios_importance, 0.0, 0.99)
-    # 扩展：每个 transformer 层内有 layer_num_in_block 子层（例如7个）
-    importance_ratios_expanded = []
-    for i in final_ratios_importance:
-        for j in range(layer_num_in_block):
-            importance_ratios_expanded.append(i)
-    print("Importance-based expanded ratios:", importance_ratios_expanded)
+    # **计算每层的各组件剪枝比例**
+    layer_component_ratios = compute_pruning_ratios(layerwise_pruning_ratios, fisher_info, grad_norms, final_esd)
+
+    return layer_component_ratios
+
+
+def compute_fisher_info(model, device):
+    """ 计算每层的 Q, K, V, Out, Gate, Up, Down 的 Fisher 信息量 """
+    fisher_info = {layer_idx: {"Q": 0, "K": 0, "V": 0, "Out": 0, "Gate": 0, "Up": 0, "Down": 0} 
+                   for layer_idx in range(len(model.model.layers))}
     
-    # ---------------------- 结合两种比例 ----------------------
-    # 这里采用加权平均方式，将 ESD-based 和 importance-based 比例融合
-    # weight_esd 为权重，默认为0.5，两者各占一半
-    if len(layerwise_pruning_ratios) != len(importance_ratios_expanded):
-        raise ValueError("Length mismatch between ESD-based and importance-based ratios!")
+    model.eval()
     
-    combined_ratios = []
-    for r_esd, r_imp in zip(layerwise_pruning_ratios, importance_ratios_expanded):
-        # 转换为 float 后计算
-        combined = float(weight_esd * r_esd + (1 - weight_esd) * r_imp)
-        combined = min(combined, 1.0)
-        combined_ratios.append(combined)
+    for layer_idx, layer in enumerate(model.model.layers):
+        fisher_info[layer_idx]["Q"] += (layer.self_attn.q_proj.weight.grad ** 2).sum().item()
+        fisher_info[layer_idx]["K"] += (layer.self_attn.k_proj.weight.grad ** 2).sum().item()
+        fisher_info[layer_idx]["V"] += (layer.self_attn.v_proj.weight.grad ** 2).sum().item()
+        fisher_info[layer_idx]["Out"] += (layer.self_attn.out_proj.weight.grad ** 2).sum().item()
+        fisher_info[layer_idx]["Gate"] += (layer.mlp.gate_proj.weight.grad ** 2).sum().item()
+        fisher_info[layer_idx]["Up"] += (layer.mlp.up_proj.weight.grad ** 2).sum().item()
+        fisher_info[layer_idx]["Down"] += (layer.mlp.down_proj.weight.grad ** 2).sum().item()
     
-    print("Combined layerwise pruning ratios:", combined_ratios)
-    return combined_ratios
+    return fisher_info
+
+
+def compute_gradient_norm(model):
+    """ 计算每层 Q, K, V, Out, Gate, Up, Down 的梯度范数 """
+    grad_norms = {layer_idx: {"Q": 0, "K": 0, "V": 0, "Out": 0, "Gate": 0, "Up": 0, "Down": 0} 
+                  for layer_idx in range(len(model.model.layers))}
+
+    for layer_idx, layer in enumerate(model.model.layers):
+        grad_norms[layer_idx]["Q"] = torch.norm(layer.self_attn.q_proj.weight.grad, p=2).item()
+        grad_norms[layer_idx]["K"] = torch.norm(layer.self_attn.k_proj.weight.grad, p=2).item()
+        grad_norms[layer_idx]["V"] = torch.norm(layer.self_attn.v_proj.weight.grad, p=2).item()
+        grad_norms[layer_idx]["Out"] = torch.norm(layer.self_attn.out_proj.weight.grad, p=2).item()
+        grad_norms[layer_idx]["Gate"] = torch.norm(layer.mlp.gate_proj.weight.grad, p=2).item()
+        grad_norms[layer_idx]["Up"] = torch.norm(layer.mlp.up_proj.weight.grad, p=2).item()
+        grad_norms[layer_idx]["Down"] = torch.norm(layer.mlp.down_proj.weight.grad, p=2).item()
+
+    return grad_norms
+
+
+def compute_pruning_ratios(prune_ratios, fisher_info, grad_norms, esd_values):
+    """ 计算每层各模块剪枝比例 """
+    layer_component_ratios = {}
+
+    for layer_idx, prune_ratio in enumerate(prune_ratios):
+        total_importance = 0
+        module_importance = {}
+
+        for module in ["Q", "K", "V", "Out", "Gate", "Up", "Down"]:
+            fisher = fisher_info[layer_idx][module]
+            grad = grad_norms[layer_idx][module]
+            esd_factor = 1 - (esd_values[layer_idx] - min(esd_values)) / (max(esd_values) - min(esd_values))
+
+            module_importance[module] = fisher + grad + esd_factor
+            total_importance += module_importance[module]
+
+        layer_component_ratios[layer_idx] = {
+            module: prune_ratio * (module_importance[module] / total_importance)
+            for module in ["Q", "K", "V", "Out", "Gate", "Up", "Down"]
+        }
+
+    return layer_component_ratios
 
 
 def ww_sparsity_llama3_8b(args, model, device=torch.device("cuda:0"),
