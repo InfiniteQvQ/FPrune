@@ -549,7 +549,7 @@ def ww_sparsity_llama2_7b_split(args, model, device=torch.device("cuda:0"),
     print("Layer-wise pruning ratios:", layerwise_pruning_ratios)
 
     # **计算 QKV+Out+Gate+Up+Down 重要性**
-    fisher_info = compute_fisher_info(model, device)
+    fisher_info = compute_smoothgrad_fisher(model, device)
     grad_norms = compute_gradient_norm(model)
     
     # **计算每层的各组件剪枝比例**
@@ -558,22 +558,59 @@ def ww_sparsity_llama2_7b_split(args, model, device=torch.device("cuda:0"),
     return layer_component_ratios
 
 
-def compute_fisher_info(model, device):
-    """ 计算每层的 Q, K, V, Out, Gate, Up, Down 的 Fisher 信息量 """
+def compute_smoothgrad_fisher(model, dataloader, device, num_samples=10, noise_scale=0.01):
+    """ 使用 SmoothGrad 计算 Q, K, V, Out, Gate, Up, Down 的 Fisher 信息 """
     fisher_info = {layer_idx: {"Q": 0, "K": 0, "V": 0, "Out": 0, "Gate": 0, "Up": 0, "Down": 0} 
                    for layer_idx in range(len(model.model.layers))}
     
-    model.eval()
-    
-    for layer_idx, layer in enumerate(model.model.layers):
-        fisher_info[layer_idx]["Q"] += (layer.self_attn.q_proj.weight.grad ** 2).sum().item()
-        fisher_info[layer_idx]["K"] += (layer.self_attn.k_proj.weight.grad ** 2).sum().item()
-        fisher_info[layer_idx]["V"] += (layer.self_attn.v_proj.weight.grad ** 2).sum().item()
-        fisher_info[layer_idx]["Out"] += (layer.self_attn.out_proj.weight.grad ** 2).sum().item()
-        fisher_info[layer_idx]["Gate"] += (layer.mlp.gate_proj.weight.grad ** 2).sum().item()
-        fisher_info[layer_idx]["Up"] += (layer.mlp.up_proj.weight.grad ** 2).sum().item()
-        fisher_info[layer_idx]["Down"] += (layer.mlp.down_proj.weight.grad ** 2).sum().item()
-    
+    model.train()  # 训练模式
+    model.zero_grad()
+
+    for batch in dataloader:
+        inputs = batch["input_ids"].to(device)
+        outputs = model(inputs)
+        loss = outputs.loss
+        
+        # 计算原始梯度
+        loss.backward()
+
+        for layer_idx, layer in enumerate(model.model.layers):
+            for module_name, module in [
+                ("Q", layer.self_attn.q_proj),
+                ("K", layer.self_attn.k_proj),
+                ("V", layer.self_attn.v_proj),
+                ("Out", layer.self_attn.out_proj),
+                ("Gate", layer.mlp.gate_proj),
+                ("Up", layer.mlp.up_proj),
+                ("Down", layer.mlp.down_proj)
+            ]:
+                if module.weight.grad is not None:
+                    fisher_info[layer_idx][module_name] += (module.weight.grad ** 2).sum().item()
+
+        # SmoothGrad 采样
+        for _ in range(num_samples):
+            noise = {param: noise_scale * torch.randn_like(param) for param in model.parameters()}
+            for param in noise:
+                param.data += noise[param]
+
+            model.zero_grad()
+            outputs = model(inputs)
+            loss = outputs.loss
+            loss.backward()
+
+            for layer_idx, layer in enumerate(model.model.layers):
+                for module_name, module in [
+                    ("Q", layer.self_attn.q_proj),
+                    ("K", layer.self_attn.k_proj),
+                    ("V", layer.self_attn.v_proj),
+                    ("Out", layer.self_attn.out_proj),
+                    ("Gate", layer.mlp.gate_proj),
+                    ("Up", layer.mlp.up_proj),
+                    ("Down", layer.mlp.down_proj)
+                ]:
+                    if module.weight.grad is not None:
+                        fisher_info[layer_idx][module_name] += (module.weight.grad ** 2).sum().item()
+
     return fisher_info
 
 
