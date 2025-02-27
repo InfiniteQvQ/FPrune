@@ -12,73 +12,78 @@ model = AutoModelForCausalLM.from_pretrained(
     torch_dtype=torch.float16
 )
 model.eval()
-
-# 为了数值稳定性，转换模型为 FP32（仅用于 Hessian 计算）
+# 为了数值稳定，转为 FP32 进行 Hessian 计算
 model = model.float()
 
 # -----------------------------
-# 2. 构造 dummy input 并计算损失
+# 2. 构造一个 dummy input 并计算 loss
 # -----------------------------
 input_ids = torch.randint(0, model.config.vocab_size, (1, 16)).to(model.device)
 output = model(input_ids=input_ids, labels=input_ids)
 loss = output.loss
 
 # -----------------------------
-# 3. 辅助函数：获取层参数、计算 Hessian Trace（Hutchinson方法）和梯度范数
+# 3. 辅助函数：获取层中需要计算的参数（仅考虑权重，不含偏置）
 # -----------------------------
 def get_layer_parameters(layer):
-    # 只计算权重参数（要求参数至少二维，避免偏置等一维参数）
+    # 只选取至少是二维的权重参数（例如矩阵），跳过一维的bias等
     return [p for p in layer.parameters() if p.requires_grad and p.dim() >= 2]
 
-def compute_hessian_trace(layer, loss, n_samples=3, eps=1e-1):
+# -----------------------------
+# 4. 利用 Hutchinson 方法近似计算单个参数的 Hessian 对角线
+# -----------------------------
+def compute_hessian_diag(p, loss, n_samples=3, eps=1e-2):
     """
-    利用 Hutchinson 方法计算该层参数的 Hessian Trace 近似值：
-      Tr(H) ≈ E[ v^T H v ]
-    其中 v 为随机向量，使用 n_samples 次采样取平均，并返回绝对值以避免负值。
+    对参数 p，利用 Hutchinson 方法估计 Hessian 对角线的元素。
+    我们采用 Rademacher 随机向量（取值 ±1），多次采样取平均，并返回一个与 p 同形状的估计张量。
     """
-    params = get_layer_parameters(layer)
-    if not params:
-        return 0.0
-    trace_estimates = []
+    diag_estimates = []
     for _ in range(n_samples):
-        vs = [torch.randn_like(p) for p in params]
-        grad_params = torch.autograd.grad(loss, params, create_graph=True, retain_graph=True)
-        dot = sum(torch.sum(g * v) for g, v in zip(grad_params, vs))
-        hvps = torch.autograd.grad(dot, params, retain_graph=True)
-        hvp_dot = sum(torch.sum(v * hvp) for v, hvp in zip(vs, hvps))
-        trace_estimates.append(hvp_dot.item())
-    trace_value = sum(trace_estimates) / len(trace_estimates)
-    return abs(trace_value)  # 取绝对值
+        # 生成 Rademacher 随机向量：每个元素取 ±1
+        v = torch.randint(0, 2, p.shape, device=p.device).float() * 2 - 1
+        # 计算 p 关于 loss 的梯度（需保持计算图）
+        grad_p = torch.autograd.grad(loss, p, create_graph=True, retain_graph=True)[0]
+        # 计算 Hessian-Vector 产品：H*v
+        hvp = torch.autograd.grad(grad_p, p, grad_outputs=v, retain_graph=True)[0]
+        # Hutchinson 近似： v * (H*v) 近似等于 p 对应的 Hessian 对角元素
+        diag_estimates.append(v * hvp)
+    # 取平均
+    diag_mean = torch.mean(torch.stack(diag_estimates), dim=0)
+    return diag_mean
 
-def compute_gradient_norm(layer, loss):
+# -----------------------------
+# 5. 对每个 Transformer 层计算重要性分数
+# -----------------------------
+def compute_layer_importance(layer, loss, n_samples=3, eps=1e-2):
     """
-    计算该层所有参数的梯度L2范数和（作为一阶信息）。
+    对给定层计算重要性分数：
+      I_layer = sum_{p in layer} sum( p^2 * |diag_H| )
+    其中 diag_H 是通过 Hutchinson 方法估计的 Hessian 对角线。
     """
     params = get_layer_parameters(layer)
-    if not params:
-        return 0.0
-    grad_params = torch.autograd.grad(loss, params, retain_graph=True)
-    norm_val = sum(torch.norm(g, p=2).item() for g in grad_params)
-    return norm_val
+    layer_importance = 0.0
+    for p in params:
+        # 计算 p^2（逐元素平方）
+        weight_square = p.detach() ** 2
+        # 计算 Hessian 对角线近似（取多次采样平均），并取绝对值
+        hessian_diag = compute_hessian_diag(p, loss, n_samples=n_samples, eps=eps)
+        layer_importance += torch.sum(weight_square * hessian_diag.abs()).item()
+    return layer_importance
 
 # -----------------------------
-# 4. 针对每个 Transformer 层计算 Hessian Trace 和梯度范数
+# 6. 遍历所有 Transformer 层（假设在 model.model.layers 中）计算重要性
 # -----------------------------
-hessian_scores = {}
-gradnorm_scores = {}
-
-# 假设 Transformer 层存放在 model.model.layers 中
+layer_importance_scores = {}
 for i, layer in enumerate(model.model.layers):
-    ht = compute_hessian_trace(layer, loss, n_samples=3, eps=1e-1)
-    gn = compute_gradient_norm(layer, loss)
-    hessian_scores[str(i)] = ht
-    gradnorm_scores[str(i)] = gn
+    imp = compute_layer_importance(layer, loss, n_samples=3, eps=1e-2)
+    layer_importance_scores[str(i)] = imp
 
-print("Hessian scores per layer:", hessian_scores)
-print("Gradient norm scores per layer:", gradnorm_scores)
+print("Raw layer importance scores (unnormalized):")
+for k in sorted(layer_importance_scores, key=lambda x: int(x)):
+    print(f"Layer {k}: {layer_importance_scores[k]:.4f}")
 
 # -----------------------------
-# 5. 对两个指标归一化
+# 7. 对所有层的重要性归一化
 # -----------------------------
 def normalize_dict(d, eps=1e-8):
     values = list(d.values())
@@ -87,34 +92,10 @@ def normalize_dict(d, eps=1e-8):
     norm = {k: (v - min_val) / (max_val - min_val + eps) for k, v in d.items()}
     return norm
 
-norm_hessian = normalize_dict(hessian_scores)
-norm_gradnorm = normalize_dict(gradnorm_scores)
+norm_importance = normalize_dict(layer_importance_scores)
+print("Normalized layer importance scores:")
+norm_list = [norm_importance[k] for k in sorted(norm_importance, key=lambda x: int(x))]
+print(norm_list)
 
-print("Normalized Hessian scores:", norm_hessian)
-print("Normalized Gradient Norm scores:", norm_gradnorm)
 
-# -----------------------------
-# 6. 融合一阶和二阶信息生成最终重要性分数
-# -----------------------------
-# alpha 控制二阶信息的权重，这里建议取 0.7（可根据验证结果调整）
-alpha = 0.7
-importance_scores = {}
-for k in norm_hessian.keys():
-    importance_scores[k] = alpha * norm_hessian[k] + (1 - alpha) * norm_gradnorm[k]
 
-print("Final importance scores per layer:")
-for k in sorted(importance_scores, key=lambda x: int(x)):
-    print(f"Layer {k}: {importance_scores[k]:.4f}")
-
-# -----------------------------
-# 7. 根据层重要性生成建议剪枝比例
-# -----------------------------
-# 假设全局剪枝率为 p_base（例如 60%），重要性越高的层剪枝比例应越低
-p_base = 0.7
-pruning_ratios = {}
-for k, imp in importance_scores.items():
-    pruning_ratios[k] = p_base * (1 - imp)
-    
-print("Suggested per-layer pruning ratios:")
-for k in sorted(pruning_ratios, key=lambda x: int(x)):
-    print(f"Layer {k}: {pruning_ratios[k]:.4f}")
