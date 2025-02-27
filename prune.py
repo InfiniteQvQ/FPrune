@@ -525,7 +525,6 @@ def ww_sparsity_llama2_7b_split(args, model, device=torch.device("cuda:0"),
         8: [20], 9: [21, 22, 23, 24, 25, 26, 27], 10: [28], 11: [29], 12: [30], 13: [31]
     }
 
-    # **计算 Block 内平均 ESD**
     result_matrix = np.zeros_like(esd_matrix)
     for seg_id in sorted(segmentation.keys()):
         layers = segmentation[seg_id]
@@ -548,111 +547,36 @@ def ww_sparsity_llama2_7b_split(args, model, device=torch.device("cuda:0"),
 
     print("Layer-wise pruning ratios:", layerwise_pruning_ratios)
 
-    # **计算 QKV+Out+Gate+Up+Down 重要性**
-    fisher_info = compute_smoothgrad_fisher(model, device)
-    grad_norms = compute_gradient_norm(model)
-    
     # **计算每层的各组件剪枝比例**
-    layer_component_ratios = compute_pruning_ratios(layerwise_pruning_ratios, fisher_info, grad_norms, final_esd)
-
+    layer_component_ratios = compute_pruning_ratios(layerwise_pruning_ratios, final_esd)
+    print(layerwise_pruning_ratios)
     return layer_component_ratios
 
 
-def compute_smoothgrad_fisher(model, dataloader, device=torch.device("cuda:0"), num_samples=10, noise_scale=0.01):
-    """ 使用 SmoothGrad 计算 Q, K, V, Out, Gate, Up, Down 的 Fisher 信息 """
-    fisher_info = {layer_idx: {"Q": 0, "K": 0, "V": 0, "Out": 0, "Gate": 0, "Up": 0, "Down": 0} 
-                   for layer_idx in range(len(model.model.layers))}
-    
-    model.train()  # 训练模式
-    model.zero_grad()
-
-    for batch in dataloader:
-        inputs = batch["input_ids"].to(device)
-        outputs = model(inputs)
-        loss = outputs.loss
-        
-        # 计算原始梯度
-        loss.backward()
-
-        for layer_idx, layer in enumerate(model.model.layers):
-            for module_name, module in [
-                ("Q", layer.self_attn.q_proj),
-                ("K", layer.self_attn.k_proj),
-                ("V", layer.self_attn.v_proj),
-                ("Out", layer.self_attn.out_proj),
-                ("Gate", layer.mlp.gate_proj),
-                ("Up", layer.mlp.up_proj),
-                ("Down", layer.mlp.down_proj)
-            ]:
-                if module.weight.grad is not None:
-                    fisher_info[layer_idx][module_name] += (module.weight.grad ** 2).sum().item()
-
-        # SmoothGrad 采样
-        for _ in range(num_samples):
-            noise = {param: noise_scale * torch.randn_like(param) for param in model.parameters()}
-            for param in noise:
-                param.data += noise[param]
-
-            model.zero_grad()
-            outputs = model(inputs)
-            loss = outputs.loss
-            loss.backward()
-
-            for layer_idx, layer in enumerate(model.model.layers):
-                for module_name, module in [
-                    ("Q", layer.self_attn.q_proj),
-                    ("K", layer.self_attn.k_proj),
-                    ("V", layer.self_attn.v_proj),
-                    ("Out", layer.self_attn.out_proj),
-                    ("Gate", layer.mlp.gate_proj),
-                    ("Up", layer.mlp.up_proj),
-                    ("Down", layer.mlp.down_proj)
-                ]:
-                    if module.weight.grad is not None:
-                        fisher_info[layer_idx][module_name] += (module.weight.grad ** 2).sum().item()
-
-    return fisher_info
-
-
-def compute_gradient_norm(model):
-    """ 计算每层 Q, K, V, Out, Gate, Up, Down 的梯度范数 """
-    grad_norms = {layer_idx: {"Q": 0, "K": 0, "V": 0, "Out": 0, "Gate": 0, "Up": 0, "Down": 0} 
-                  for layer_idx in range(len(model.model.layers))}
-
-    for layer_idx, layer in enumerate(model.model.layers):
-        grad_norms[layer_idx]["Q"] = torch.norm(layer.self_attn.q_proj.weight.grad, p=2).item()
-        grad_norms[layer_idx]["K"] = torch.norm(layer.self_attn.k_proj.weight.grad, p=2).item()
-        grad_norms[layer_idx]["V"] = torch.norm(layer.self_attn.v_proj.weight.grad, p=2).item()
-        grad_norms[layer_idx]["Out"] = torch.norm(layer.self_attn.out_proj.weight.grad, p=2).item()
-        grad_norms[layer_idx]["Gate"] = torch.norm(layer.mlp.gate_proj.weight.grad, p=2).item()
-        grad_norms[layer_idx]["Up"] = torch.norm(layer.mlp.up_proj.weight.grad, p=2).item()
-        grad_norms[layer_idx]["Down"] = torch.norm(layer.mlp.down_proj.weight.grad, p=2).item()
-
-    return grad_norms
-
-
-def compute_pruning_ratios(prune_ratios, fisher_info, grad_norms, esd_values):
-    """ 计算每层各模块剪枝比例 """
+def compute_pruning_ratios(prune_ratios, esd_values):
+    """ 计算每层 Q, K, V, Out, Gate, Up, Down 的剪枝比例 """
     layer_component_ratios = {}
 
     for layer_idx, prune_ratio in enumerate(prune_ratios):
         total_importance = 0
         module_importance = {}
 
-        for module in ["Q", "K", "V", "Out", "Gate", "Up", "Down"]:
-            fisher = fisher_info[layer_idx][module]
-            grad = grad_norms[layer_idx][module]
-            esd_factor = 1 - (esd_values[layer_idx] - min(esd_values)) / (max(esd_values) - min(esd_values))
+        for module_name, esd_value in zip(["Q", "K", "V", "Out", "Gate", "Up", "Down"], esd_values[layer_idx * 7: (layer_idx + 1) * 7]):
+            # 归一化 ESD 值 (越小越重要)
+            norm_esd = 1 - (esd_value - min(esd_values)) / (max(esd_values) - min(esd_values))
+            module_importance[module_name] = norm_esd
+            total_importance += norm_esd
 
-            module_importance[module] = fisher + grad + esd_factor
-            total_importance += module_importance[module]
-
+        # 计算剪枝比例
         layer_component_ratios[layer_idx] = {
             module: prune_ratio * (module_importance[module] / total_importance)
             for module in ["Q", "K", "V", "Out", "Gate", "Up", "Down"]
         }
 
     return layer_component_ratios
+
+
+
 
 
 def ww_sparsity_llama3_8b(args, model, device=torch.device("cuda:0"),
