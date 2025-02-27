@@ -490,99 +490,111 @@ def ww_sparsity_llama2_7b(args, model, device=torch.device("cuda:0"),
 def ww_sparsity_llama2_7b_split(args, model, device=torch.device("cuda:0"),
                                 s1=0.8, s2=1.2, ratios=None, prune_n=0, prune_m=0,
                                 weight_esd=0.8, eps=1e-8):
-    """ 计算 LLaMA 7B 各层的 Q, K, V, Out, Gate, Up, Down 剪枝比例 """
+    """
+    基于 ESD 数值计算 LLaMA 7B 各层（32 层，每层 7 个模块：Q, K, V, Out, Gate, Up, Down）的剪枝比例。
+    计算流程：
+      1. 加载 ESD 指标，并按照分块（segmentation）计算 block-level 平均 ESD；
+      2. 计算线性映射得到每个模块的剪枝比例（总长度 224）；
+      3. 将剪枝比例 reshape 成 (32, 7)，并计算每层整体剪枝率（取均值）；
+      4. 利用每层所有模块的 ESD 数值归一化（归一化公式：1 - (esd - esd_min)/(esd_max - esd_min)），
+         重要性高（归一化值大）的模块剪枝比例低，重要性低的模块剪枝比例高；
+      5. 将每层整体剪枝率按归一化的模块重要性重新分配到每个模块上，返回每层 7 个模块的剪枝比例。
+    """
     
+    # Step 1: 获取 Transformer 层以及各模块参数数量
     if "opt" in args.model:
         blocks = model.model.decoder.layers    
     else:
         blocks = model.model.layers
 
-    # 获取 Transformer 层
+    # 假设 find_layers 返回每层的字典，字典中包含各模块的权重
     layers = [find_layers(blocks)]
     prunables = []
     for layer in layers:
         for name in layer:
             prunables.append(layer[name].weight.numel())
-
+    # 每层模块数
     layer_num_in_block = int(len(prunables) / len(blocks))
-
-    # **加载 ESD 指标**
+    
+    # Step 2: 加载 ESD 指标并分块处理
     metrics = np.load(f"{args.ww_metric_cache}/{args.ww_metric}.npy")
     print("ESD raw metrics:", metrics)
-
     if args.mapping_type == 'block_wise':
         block_metrics = [np.mean(metrics[i:i+layer_num_in_block]) 
                          for i in range(0, len(metrics), layer_num_in_block)]
         metrics = [i for i in block_metrics for j in range(layer_num_in_block)]
-
     metrics = np.array(metrics)
-    esd_matrix = metrics.reshape((32, 7))
-
-    # **按 block 进行分区**
+    esd_matrix = metrics.reshape((len(blocks), layer_num_in_block))  # 例如 (32, 7)
+    
+    # 根据 segmentation 进行 block-level平均（如果需要）
     segmentation = {
-        0: [0], 1: [1], 2: [2, 3], 3: [4, 5, 6, 7, 8, 9, 10],
-        4: [11, 12], 5: [13, 14, 15], 6: [16], 7: [17, 18, 19],
-        8: [20], 9: [21, 22, 23, 24, 25, 26, 27], 10: [28], 11: [29], 12: [30], 13: [31]
+        0: [0],
+        1: [1],
+        2: [2, 3],
+        3: [4, 5, 6, 7, 8, 9, 10],
+        4: [11, 12],
+        5: [13, 14, 15],
+        6: [16],
+        7: [17, 18, 19],
+        8: [20],
+        9: [21, 22, 23, 24, 25, 26, 27],
+        10: [28],
+        11: [29],
+        12: [30],
+        13: [31]
     }
-
     result_matrix = np.zeros_like(esd_matrix)
     for seg_id in sorted(segmentation.keys()):
-        layers = segmentation[seg_id]
-        seg_values = esd_matrix[layers, :]
+        layer_idxs = segmentation[seg_id]
+        seg_values = esd_matrix[layer_idxs, :]
         seg_avg = np.mean(seg_values)
-        result_matrix[layers, :] = seg_avg
-
-    # **转换为 1D ESD 评分**
+        result_matrix[layer_idxs, :] = seg_avg
+    # 展平成 1D 数组，长度 = (层数 × 模块数)
     final_esd = result_matrix.flatten()
+    print("Block-level averaged ESD scores (flattened):", final_esd)
+    
+    # Step 3: 线性映射得到原始每模块剪枝比例（基于 ESD 数值）
     scores = torch.tensor(final_esd)
-    prunables = torch.tensor(prunables)
-
-    # **线性映射 ESD 评分**
+    prunables_tensor = torch.tensor(prunables)  # 也应为长度 224
     max_score = torch.max(scores)
     min_score = torch.min(scores)
-    layerwise_pruning_ratios = (((scores - min_score) / (max_score - min_score)) * (s2 - s1) + s1)
-    scaler = torch.sum(prunables) * args.sparsity_ratio / (torch.sum(prunables * layerwise_pruning_ratios))  
-    layerwise_pruning_ratios = layerwise_pruning_ratios * scaler
-    layerwise_pruning_ratios = layerwise_pruning_ratios.cpu().numpy().tolist()
-
-    print("Layer-wise pruning ratios:", layerwise_pruning_ratios)
-
-    # **计算每层的各组件剪枝比例**
-    layer_component_ratios = compute_pruning_ratios(layerwise_pruning_ratios, final_esd)
-    print(layerwise_pruning_ratios)
-    return layer_component_ratios
-
-
-def compute_pruning_ratios(prune_ratios, esd_values):
-    """ 计算每层 Q, K, V, Out, Gate, Up, Down 的剪枝比例 """
-
-    num_layers = len(prune_ratios)  # 32 层
-    num_modules_per_layer = 7  # 每层 7 个子模块
-    total_layers = len(esd_values) // num_modules_per_layer  # ESD 数据对应的总层数
-    assert num_layers == total_layers, f"Mismatch: prune_ratios ({num_layers}) vs ESD layers ({total_layers})"
-
+    # 线性映射：低 ESD（重要性高）对应较低剪枝比例，反之较高剪枝比例
+    raw_module_ratios = (((scores - min_score) / (max_score - min_score)) * (s2 - s1) + s1)
+    scaler = torch.sum(prunables_tensor) * args.sparsity_ratio / (torch.sum(prunables_tensor * raw_module_ratios))
+    module_ratios = raw_module_ratios * scaler
+    module_ratios = module_ratios.cpu().numpy()  # shape (224,)
+    
+    # Step 4: 将 module_ratios reshape 成 (num_layers, num_modules)
+    num_layers = len(blocks)  # 例如 32
+    num_modules = layer_num_in_block  # 例如 7
+    module_ratios_matrix = module_ratios.reshape((num_layers, num_modules))
+    
+    # 计算每层整体剪枝率 R(l)（这里取各模块剪枝比例的均值，也可以使用其他统计方式）
+    layer_overall_ratio = np.mean(module_ratios_matrix, axis=1)  # shape (32,)
+    
+    # Step 5: 利用 ESD 归一化重新分配到每个模块
+    # 用整个 final_esd（即 result_matrix.flatten()）计算归一化参数
+    esd_min = np.min(final_esd)
+    esd_max = np.max(final_esd)
+    
+    # 重新计算各模块的重要性： I = 1 - (esd - esd_min)/(esd_max - esd_min)
+    # 并用此归一化值作为权重分配每层整体剪枝率
     layer_component_ratios = {}
-
     for layer_idx in range(num_layers):
-        total_importance = 0
-        module_importance = []
-
-        # **确保不会访问超出索引**
-        start_idx = layer_idx * num_modules_per_layer
-        end_idx = min(start_idx + num_modules_per_layer, len(esd_values))  # 避免溢出
-        layer_esd_values = esd_values[start_idx:end_idx]
-
-        for esd_value in layer_esd_values:
-            norm_esd = 1 - (esd_value - min(esd_values)) / (max(esd_values) - min(esd_values))
-            module_importance.append(norm_esd)
-            total_importance += norm_esd
-
-        # **计算剪枝比例**
-        layer_component_ratios[layer_idx] = [
-            prune_ratios[layer_idx] * (module_importance[i] / total_importance)
-            for i in range(len(module_importance))
-        ]
-
+        # 取该层 7 个模块的 ESD 数值
+        layer_esd = module_ratios_matrix[layer_idx, :]  # 此处注意：module_ratios_matrix已是剪枝比例；而我们需要 ESD 对应的归一化值
+        # 这里应使用 result_matrix[layer_idx, :] 对应的 ESD 数值
+        layer_esd_values = result_matrix[layer_idx, :]
+        module_importance = 1 - (layer_esd_values - esd_min) / (esd_max - esd_min)
+        total_importance = np.sum(module_importance)
+        # 重新分配：每个模块最终剪枝比例 = layer_overall_ratio * (module_importance / total_importance)
+        final_module_ratios = layer_overall_ratio[layer_idx] * (module_importance / total_importance)
+        layer_component_ratios[layer_idx] = final_module_ratios.tolist()
+    
+    print("Final per-layer component (QKV,Out,Gate,Up,Down) pruning ratios:")
+    for layer_idx in sorted(layer_component_ratios.keys()):
+        print(f"Layer {layer_idx}: {layer_component_ratios[layer_idx]}")
+    
     return layer_component_ratios
 
 
