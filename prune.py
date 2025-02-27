@@ -552,10 +552,10 @@ def ww_sparsity_llama2_7b_split(args, model, device=torch.device("cuda:0"),
     prunables = torch.tensor(prunables)
 
     # linear mapping
-    max = torch.max(scores)
-    min = torch.min(scores)
+    max_score = torch.max(scores)
+    min_score = torch.min(scores)
     
-    layerwise_pruning_ratios = (((scores - min) / (max - min)) * (s2 - s1) + s1)
+    layerwise_pruning_ratios = (((scores - min_score) / (max_score - min_score)) * (s2 - s1) + s1)
     scaler = torch.sum(prunables) * args.sparsity_ratio / (torch.sum(prunables * layerwise_pruning_ratios))  
     layerwise_pruning_ratios = layerwise_pruning_ratios * scaler
     layerwise_pruning_ratios = layerwise_pruning_ratios.cpu().numpy().tolist()
