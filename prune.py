@@ -594,7 +594,8 @@ def ww_sparsity_llama2_7b_split(args, model, device=torch.device("cuda:0"),
     
     combined_ratios = []
     for r_esd, r_imp in zip(layerwise_pruning_ratios, importance_ratios_expanded):
-        combined = weight_esd * r_esd + (1 - weight_esd) * r_imp
+        # 转换为 float 后计算
+        combined = float(weight_esd * r_esd + (1 - weight_esd) * r_imp)
         combined = min(combined, 1.0)
         combined_ratios.append(combined)
     
