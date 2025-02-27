@@ -86,10 +86,14 @@ def compute_qk_importance(model, qk_multiplier=1.0):
 def main():
     # 这里 qk_multiplier 可以调节 Q/K 权重（默认设为 1.0，可根据需要调整）
     importance = compute_qk_importance(model, qk_multiplier=1.0)
+    for name, module in model.model.layers[0].named_modules():
+        if any(x in name for x in ["q_proj", "k_proj", "v_proj", "gate_proj", "o_proj", "up_proj", "down_proj"]):
+            print(name)
+
     # 假设层索引为数字字符串，按数值从小到大排序输出
-    sorted_importance = [importance[layer] for layer in sorted(importance, key=lambda x: int(x))]
-    print("Importance per layer (based solely on Q/K):")
-    print(sorted_importance)
+    #sorted_importance = [importance[layer] for layer in sorted(importance, key=lambda x: int(x))]
+    #print("Importance per layer (based solely on Q/K):")
+    #print(sorted_importance)
 
 if __name__ == "__main__":
     main()
