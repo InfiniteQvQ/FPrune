@@ -490,9 +490,6 @@ def ww_sparsity_llama2_7b(args, model, device=torch.device("cuda:0"),
 def ww_sparsity_llama2_7b_split(args, model, device=torch.device("cuda:0"),
                          s1=0.8, s2=1.2, ratios=None, prune_n=0, prune_m=0,
                          weight_esd=0.5, eps=1e-8):
-    
-    importance = np.array([0.10597244441548084, 0.18225273180877366, 0.9999999999977195, 0.15235971886031907, 0.11145644387209516, 0.08261579677286911, 0.063563355234858, 0.05808032436775416, 0.04889437962178093, 0.04067889971586724, 0.030676647114481786, 0.026178088695588016, 0.01846896321689523, 0.018028220421901435, 0.018338456807909752, 0.018129528455074397, 0.02118048925420386, 0.01995123154270534, 0.020772026922051556, 0.016335563715719068, 0.016173417141980687, 0.009086007405269287, 0.00948054151405449, 0.0060406584034754535, 0.0021394874440927797, 0.0003531292350620161, 0.00016829334839173836, 0.0, 0.0032171141295040165, 0.0014129328947638294, 0.1739574842781852, 0.017425388906189495])
-
     if "opt" in args.model:
         blocks = model.model.decoder.layers    
     else:
@@ -506,38 +503,50 @@ def ww_sparsity_llama2_7b_split(args, model, device=torch.device("cuda:0"),
         for name in layer:
             prunables.append(layer[name].weight.numel())
     layer_num_in_block = int(len(prunables) / len(blocks))
+    
+    # 加载ESD指标
+    metrics = np.load(f"{args.ww_metric_cache}/{args.ww_metric}.npy")
+    print("ESD raw metrics:", metrics)
+    if args.mapping_type == 'block_wise':
+        block_metrics = [np.mean(metrics[i:i+layer_num_in_block]) 
+                         for i in range(0, len(metrics), layer_num_in_block)]
+        metrics = [i for i in block_metrics for j in range(layer_num_in_block)]
+    print("ESD metric values after block_wise processing:", metrics)
+    esd_matrix = metrics.reshape((32, 7))
+    segmentation = {
+        0: [0],
+        1: [1],
+        2: [2, 3],
+        3: [4, 5, 6, 7, 8, 9, 10],
+        4: [11, 12],
+        5: [13, 14, 15],
+        6: [16],
+        7: [17, 18, 19],
+        8: [20],
+        9: [21, 22, 23, 24, 25, 26, 27],
+        10: [28],
+        11: [29],
+        12: [30],
+        13: [31]
+    }
 
-    # -----------------------------
-    # 1. 扩展 importance 数组到每个子层（即每个 transformer 层的指标重复 layer_num_in_block 次）
-    # -----------------------------
-    importance_expanded = []
-    for imp in importance:
-        for _ in range(layer_num_in_block):
-            importance_expanded.append(imp)
-    # 此时 importance_expanded 长度应为 32 * layer_num_in_block
+    # 初始化结果矩阵
+    result_matrix = np.zeros_like(esd_matrix)
 
-    # -----------------------------
-    # 2. 利用与 ESD 映射相同的线性映射方式将 importance 映射到 [s1, s2] 区间
-    # 并根据全局目标剪枝率和各层参数数量进行缩放
-    # -----------------------------
-    scores = torch.tensor(importance_expanded, dtype=torch.float32)
-    prunables_tensor = torch.tensor(prunables, dtype=torch.float32)
+    # 对每个分组计算平均值，并赋值到该分组所有层
+    for seg_id in sorted(segmentation.keys()):
+        layers = segmentation[seg_id]
+        # 提取该组所有层的ESD数值，形状为 (len(layers), 7)
+        seg_values = esd_matrix[layers, :]
+        # 计算该组内所有数值的平均值
+        seg_avg = np.mean(seg_values)
+        # 将平均值赋给该组所有层（每行的所有7个数值）
+        result_matrix[layers, :] = seg_avg
 
-    max_score = torch.max(scores)
-    min_score = torch.min(scores)
-
-    # 线性映射到 [s1, s2]
-    layerwise_pruning_ratios_importance = (((max_score - scores) / (max_score - min_score)) * (s2 - s1) + s1)
-
-    # 使用参数总量和全局目标剪枝率计算缩放因子，保证整体剪枝率符合目标
-    scaler = torch.sum(prunables_tensor) * args.sparsity_ratio / (torch.sum(prunables_tensor * layerwise_pruning_ratios_importance))
-    layerwise_pruning_ratios_importance = layerwise_pruning_ratios_importance * scaler
-
-    final_importance_ratios = layerwise_pruning_ratios_importance.cpu().numpy().tolist()
-
-    print("Mapped importance-based pruning ratios per sub-layer (ordered by layer):")
-    print(final_importance_ratios)
-    return final_importance_ratios
+    # 如果需要将结果转为1D列表（长度224），可以展平矩阵
+    final_esd = result_matrix.flatten()
+    print("Block-level averaged ESD scores (flattened):")
+    print(final_esd)
 
 
 
