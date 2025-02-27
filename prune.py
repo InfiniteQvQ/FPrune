@@ -547,7 +547,23 @@ def ww_sparsity_llama2_7b_split(args, model, device=torch.device("cuda:0"),
     # 如果需要将结果转为1D列表（长度224），可以展平矩阵
     final_esd = result_matrix.flatten()
     print("Block-level averaged ESD scores (flattened):")
-    print(final_esd)
+    
+    scores = torch.tensor(final_esd)
+    prunables = torch.tensor(prunables)
+
+    # linear mapping
+    max = torch.max(scores)
+    min = torch.min(scores)
+    
+    layerwise_pruning_ratios = (((scores - min) / (max - min)) * (s2 - s1) + s1)
+    scaler = torch.sum(prunables) * args.sparsity_ratio / (torch.sum(prunables * layerwise_pruning_ratios))  
+    layerwise_pruning_ratios = layerwise_pruning_ratios * scaler
+    layerwise_pruning_ratios = layerwise_pruning_ratios.cpu().numpy().tolist()
+    print("ratio: ")
+    print(layerwise_pruning_ratios)
+    #layerwise_pruning_ratios = np.clip(layerwise_pruning_ratios, 0.0, 1.0)
+    #print(layerwise_pruning_ratios, " new ratio")
+    return layerwise_pruning_ratios
 
 
 
