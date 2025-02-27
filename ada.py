@@ -36,7 +36,7 @@ def compute_qk_esd(model, eps=1e-8):
     """
     esd_values = {}
     for name, module in model.named_modules():
-        if "q_proj" in name or "k_proj" in name:
+        
             layer_index = get_layer_index(name)
             if layer_index is None:
                 continue
