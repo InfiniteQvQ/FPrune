@@ -512,6 +512,7 @@ def ww_sparsity_llama2_7b_split(args, model, device=torch.device("cuda:0"),
                          for i in range(0, len(metrics), layer_num_in_block)]
         metrics = [i for i in block_metrics for j in range(layer_num_in_block)]
     print("ESD metric values after block_wise processing:", metrics)
+    metrics = np.array(metrics)
     esd_matrix = metrics.reshape((32, 7))
     segmentation = {
         0: [0],
