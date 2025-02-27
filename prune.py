@@ -556,30 +556,34 @@ def ww_sparsity_llama2_7b_split(args, model, device=torch.device("cuda:0"),
 def compute_pruning_ratios(prune_ratios, esd_values):
     """ 计算每层 Q, K, V, Out, Gate, Up, Down 的剪枝比例 """
 
-    # 每层包含 7 个模块 (Q, K, V, Out, Gate, Up, Down)
-    num_modules_per_layer = 7
+    num_layers = len(prune_ratios)  # 32 层
+    num_modules_per_layer = 7  # 每层 7 个子模块
+    total_layers = len(esd_values) // num_modules_per_layer  # ESD 数据对应的总层数
+    assert num_layers == total_layers, f"Mismatch: prune_ratios ({num_layers}) vs ESD layers ({total_layers})"
+
     layer_component_ratios = {}
 
-    for layer_idx, prune_ratio in enumerate(prune_ratios):
+    for layer_idx in range(num_layers):
         total_importance = 0
         module_importance = []
 
-        # **遍历该层的 7 个模块**
-        for module_idx in range(num_modules_per_layer):
-            esd_value = esd_values[layer_idx * num_modules_per_layer + module_idx]
+        # **确保不会访问超出索引**
+        start_idx = layer_idx * num_modules_per_layer
+        end_idx = min(start_idx + num_modules_per_layer, len(esd_values))  # 避免溢出
+        layer_esd_values = esd_values[start_idx:end_idx]
+
+        for esd_value in layer_esd_values:
             norm_esd = 1 - (esd_value - min(esd_values)) / (max(esd_values) - min(esd_values))
             module_importance.append(norm_esd)
             total_importance += norm_esd
 
         # **计算剪枝比例**
         layer_component_ratios[layer_idx] = [
-            prune_ratio * (module_importance[module_idx] / total_importance)
-            for module_idx in range(num_modules_per_layer)
+            prune_ratios[layer_idx] * (module_importance[i] / total_importance)
+            for i in range(len(module_importance))
         ]
 
     return layer_component_ratios
-
-
 
 
 
