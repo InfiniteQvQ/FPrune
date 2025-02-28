@@ -5,8 +5,6 @@ from transformers import AutoModelForCausalLM, LlamaTokenizer
 # 超参数
 ATTN_WEIGHT = 1.5   # Q, K, V 的权重
 MLP_WEIGHT = 1.0    # Out, Gate, Up, Down 的权重
-S1 = 0.8          # 线性映射下限
-S2 = 1.2           # 线性映射上限
 EP = 1e-8           # 防止除零
 
 # ==================== 计算 QKV 注意力重要性 ====================
@@ -21,12 +19,11 @@ def compute_attention_importance(model, dataloader, device):
             outputs = model(**inputs, output_attentions=True)
             attentions = outputs.attentions  # shape: (num_layers, batch_size, num_heads, seq_len, seq_len)
 
-            for layer_idx, layer_attention in enumerate(attentions):
-                # 计算每个 head 的均值
-                attn_scores = layer_attention.mean(dim=(0, 2, 3)).cpu().numpy()
-                module_importance["q_proj"][layer_idx] += attn_scores[0]  # 取 Q 投影的均值
-                module_importance["k_proj"][layer_idx] += attn_scores[1]  # 取 K 投影的均值
-                module_importance["v_proj"][layer_idx] += attn_scores[2]  # 取 V 投影的均值
+            for layer_idx in range(num_layers):
+                attn = attentions[layer_idx].mean(dim=(0, 3))  # 对 batch 维度和 seq_len 维度取均值
+                module_importance["q_proj"][layer_idx] += attn[0].mean().item()  # 取第 1 个 head
+                module_importance["k_proj"][layer_idx] += attn[1].mean().item()  # 取第 2 个 head
+                module_importance["v_proj"][layer_idx] += attn[2].mean().item()  # 取第 3 个 head
 
     for key in module_importance.keys():
         module_importance[key] /= len(dataloader)
@@ -47,18 +44,27 @@ def compute_fisher_information(model, inputs, labels, module_keys, device):
         for key in module_keys:
             param_list = [p for n, p in layer.named_parameters() if key in n and p.grad is not None]
             if len(param_list) > 0:
-                fisher_values = [torch.mean(p.grad ** 2).item() for p in param_list]
-                fisher_scores[key][i] = np.mean(fisher_values)  # 计算该层的 Fisher 信息
+                fisher_values = [torch.mean(p.grad ** 2).item() for p in param_list]  # 计算 Fisher 信息
+                fisher_scores[key][i] = np.sum(fisher_values)  # 不取均值，直接求和，保持数值差异
 
     return fisher_scores
 
-# ==================== 归一化并组合最终分数 ====================
-def normalize_importance_scores(scores_dict):
-    """对 QKV 和 Out, Gate, Up, Down 进行归一化"""
-    for key in scores_dict:
-        arr = scores_dict[key]
-        min_val, max_val = arr.min(), arr.max()
-        scores_dict[key] = ((arr - min_val) / (max_val - min_val + EP)) * (S2 - S1) + S1
+# ==================== 组合最终分数 ====================
+def combine_scores(attn_scores, fisher_scores):
+    """不归一化，直接组合"""
+    num_layers = len(attn_scores["q_proj"])
+    importance_matrix = np.zeros((num_layers, 7))
+
+    for i in range(num_layers):
+        importance_matrix[i, 0] = attn_scores["q_proj"][i] * ATTN_WEIGHT
+        importance_matrix[i, 1] = attn_scores["k_proj"][i] * ATTN_WEIGHT
+        importance_matrix[i, 2] = attn_scores["v_proj"][i] * ATTN_WEIGHT
+        importance_matrix[i, 3] = fisher_scores["o_proj"][i] * MLP_WEIGHT
+        importance_matrix[i, 4] = fisher_scores["gate_proj"][i] * MLP_WEIGHT
+        importance_matrix[i, 5] = fisher_scores["up_proj"][i] * MLP_WEIGHT
+        importance_matrix[i, 6] = fisher_scores["down_proj"][i] * MLP_WEIGHT
+
+    return importance_matrix
 
 # ==================== 主函数 ====================
 if __name__ == "__main__":
@@ -94,25 +100,10 @@ if __name__ == "__main__":
     module_keys = ["o_proj", "gate_proj", "up_proj", "down_proj"]
     fisher_scores = compute_fisher_information(model, inputs, labels, module_keys, device)
 
-    # 归一化所有得分
-    normalize_importance_scores(attn_scores)
-    normalize_importance_scores(fisher_scores)
-
-    # 组合 32 层的 7 个数值，形成 (32×7) 的 numpy 数组
-    num_layers = len(model.model.layers)
-    importance_matrix = np.zeros((num_layers, 7))
-
-    for i in range(num_layers):
-        importance_matrix[i, 0] = attn_scores["q_proj"][i] * ATTN_WEIGHT
-        importance_matrix[i, 1] = attn_scores["k_proj"][i] * ATTN_WEIGHT
-        importance_matrix[i, 2] = attn_scores["v_proj"][i] * ATTN_WEIGHT
-        importance_matrix[i, 3] = fisher_scores["o_proj"][i] * MLP_WEIGHT
-        importance_matrix[i, 4] = fisher_scores["gate_proj"][i] * MLP_WEIGHT
-        importance_matrix[i, 5] = fisher_scores["up_proj"][i] * MLP_WEIGHT
-        importance_matrix[i, 6] = fisher_scores["down_proj"][i] * MLP_WEIGHT
+    # 组合最终重要性分数 (不归一化)
+    importance_matrix = combine_scores(attn_scores, fisher_scores)
 
     # 保存重要性分数
     np.save("importance_scores.npy", importance_matrix)
-    print(importance_matrix)
     print("Importance scores saved to importance_scores.npy")
     print(importance_matrix)
