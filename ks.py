@@ -144,12 +144,14 @@ def compute_grad_norms(model: PipelineParallelLlama):
 # ------------------------------
 def main():
     # 1. 加载预训练的 LLaMA-7B
+    cache_dir = "/root/autodl-tmp/llm_weights"
     model_name = "pinkmanlove/llama-7b-hf"
     print("Loading original HF LLaMA model...")
 
     # 由于是7B，最好用 fp16 来节省显存
     hf_model = AutoModelForCausalLM.from_pretrained(
         model_name, torch_dtype=torch.float16
+        cache_dir=cache_dir,
     )
     hf_model.gradient_checkpointing_enable()
 
