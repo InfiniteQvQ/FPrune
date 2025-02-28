@@ -92,11 +92,11 @@ if __name__ == "__main__":
     # Load tokenizer (ensure consistency with the model)
     tokenizer = LlamaTokenizer.from_pretrained("HuggingFaceM4/llama-7b-tokenizer")
     
-    # 生成一个测试样本
     text = "Hello, this is a test input for importance computation."
-    inputs = tokenizer(text, return_tensors="pt").to(device)
+    inputs = tokenizer(text, return_tensors="pt")
+    inputs = {k: v.to(device) for k, v in inputs.items()}  # 确保每个 tensor 都转移到设备上
     dataloader = [inputs]  # 这里假设 dataloader 只有一个 batch
-    
+
     importance_scores = compute_importance_scores(model, dataloader, device)
     np.save("importance_scores.npy", importance_scores)
     print("Importance scores saved to importance_scores.npy")
