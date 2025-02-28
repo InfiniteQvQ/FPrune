@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from transformers import LlamaForCausalLM, LlamaTokenizer, AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, LlamaTokenizer
 
 # **加载 LLaMA 7B 模型**
 cache_dir = "/root/autodl-tmp/llm_weights"
@@ -14,7 +14,7 @@ tokenizer_name = "HuggingFaceM4/llama-7b-tokenizer"
 tokenizer = LlamaTokenizer.from_pretrained(tokenizer_name)
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
-
+model.to(device).eval()
 
 # **测试输入**
 sample_text = "The quick brown fox jumps over the lazy dog."
@@ -28,7 +28,7 @@ with torch.no_grad():
 delta = 1e-3
 
 # **存储影响分数**
-influence_scores = {}
+influence_scores = []
 
 # **计算每一层的影响分数**
 for layer_idx, layer in enumerate(model.model.layers):
@@ -57,20 +57,16 @@ for layer_idx, layer in enumerate(model.model.layers):
 
         # **计算影响分数**
         influence_score = torch.norm(base_output - perturbed_output).item() / delta
-        influence_scores[f"Layer {layer_idx} - {name}"] = influence_score
+        influence_scores.append(influence_score)
 
         # **恢复原始权重**
         param.weight.data.copy_(original_weight)
 
-# **显示影响分数**
-sorted_scores = sorted(influence_scores.items(), key=lambda x: x[1], reverse=True)
+# **转换为 1D Tensor**
+influence_tensor = torch.tensor(influence_scores, dtype=torch.float32, device=device)
 
-# **打印前 10 个最重要的层**
-print("\n🔥 Top-10 Most Important Layers 🔥")
-for name, score in sorted_scores[:10]:
-    print(f"{name}: {score:.6f}")
+# **打印影响分数**
+print("\n🔥 Influence Scores for Each Component 🔥")
+print(influence_tensor)
 
-# **打印前 10 个最不重要的层（适合剪枝）**
-print("\n❄️ Top-10 Least Important Layers (Pruning Candidates) ❄️")
-for name, score in sorted_scores[-10:]:
-    print(f"{name}: {score:.6f}")
+
