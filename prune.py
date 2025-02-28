@@ -602,6 +602,9 @@ def ww_sparsity_llama2_7b_split(args, model, device=torch.device("cuda:0"),
     print("每层各模块的剪枝比例分配（每行依次对应 Q, K, V, O, gate, up, down）：")
     for i, alloc in enumerate(module_prune_allocations):
         print(f"Layer {i+1:02d}: " + ", ".join(f"{ratio:.4f}" for ratio in alloc))
+    flat_allocations = module_prune_allocations.flatten()
+    return flat_allocations
+    
 
 
 def ww_sparsity_llama3_8b(args, model, device=torch.device("cuda:0"),
