@@ -566,10 +566,13 @@ def ww_sparsity_llama2_7b_split(args, model, device=torch.device("cuda:0"),
     for i in range(num_layers):
         # 取出该层的 7 个模块的 Fisher 分数
         layer_fisher = fisher_scores[i]
+        min_f = layer_fisher.min()
+        max_f = layer_fisher.max()
         # 计算倒数（注意：Fisher 分数越高，倒数越低，表示该模块更重要，不宜剪得多）
-        inv_fisher = 1.0 / (layer_fisher + ep)
+        mapped_fisher = ((layer_fisher - min_f) / (max_f - min_f + ep)) * (s2 - s1) + s1
         # 归一化使得各模块权重之和为 1
-        inv_norm = inv_fisher / inv_fisher.sum()
+        inv_mapped = 1.0 / (mapped_fisher + ep)
+        inv_norm = inv_mapped / inv_mapped.sum()
         # 该层整体剪枝比例（由 ESD 得到）
         layer_prune_ratio = metrics[7*i]
         # 将整体剪枝比例按倒数归一化的权重进行分配
