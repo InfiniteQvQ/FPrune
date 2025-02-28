@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 from accelerate import Accelerator
+from accelerate.utils import DummyOptim
 from transformers import AutoModelForCausalLM, LlamaTokenizer
 
 def compute_grad_norms(model):
@@ -8,7 +9,7 @@ def compute_grad_norms(model):
     计算 LLaMA 模型中常见投影层的归一化梯度范数。
     返回一个字典，每个键对应一种投影层，每个值是各层梯度范数的数组。
     """
-    module_keys = ["q_proj", "k_proj", "v_proj", "o_proj", 
+    module_keys = ["q_proj", "k_proj", "v_proj", "o_proj",
                    "gate_proj", "up_proj", "down_proj"]
 
     # LLaMA 的 TransformerBlock 在 model.model.layers 中
@@ -45,19 +46,26 @@ def compute_grad_norms(model):
 
 
 def main():
-    accelerator = Accelerator()  
-    # 如果你在 accelerate config 中没有选择 fp16，可以在代码里写：
-    # accelerator = Accelerator(mixed_precision="fp16")
+    # 在代码里手动指定 FSDP 参数（可省略，使用 accelerate config 中的也行）
+    accelerator = Accelerator(
+        mixed_precision="fp16",  # 或 "bf16"
+        fsdp="full_shard",      # 也可选 "auto_wrap"
+        fsdp_offload_params=False,  # 是否offload参数到CPU
+        fsdp_config={
+            "min_num_params": 1e8,  # auto_wrap模式时的参数阈值，也可不写
+            # 更多可选项见 https://huggingface.co/docs/accelerate/usage_guides/fsdp
+        }
+    )
+    # 如果你想用命令行全配置，就不需要在这里传 fsdp= 等参数，直接写:
+    # accelerator = Accelerator()
 
     # 1. 加载 LLaMA-7B 模型（可以替换为你自己的模型名称或路径）
     model_name = "pinkmanlove/llama-7b-hf"
     tokenizer_name = "HuggingFaceM4/llama-7b-tokenizer"
 
     print("Loading model...")
-    cache_dir = "/root/autodl-tmp/llm_weights"
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        cache_dir=cache_dir,
         torch_dtype=torch.float16
     )
 
@@ -68,8 +76,11 @@ def main():
     print("Loading tokenizer...")
     tokenizer = LlamaTokenizer.from_pretrained(tokenizer_name)
 
-    # 3. 用 accelerator.prepare 包装模型、优化器（若有）
-    model = accelerator.prepare(model)
+    # 如果你要训练，需要一个 Optimizer；本例只是做前向和梯度分析，随便用一个 DummyOptim
+    optimizer = DummyOptim(model.parameters())
+
+    # 3. 用 accelerator.prepare 包装模型、优化器
+    model, optimizer = accelerator.prepare(model, optimizer)
 
     # 4. 准备输入
     text = "Hello, this is a test input for importance computation."
