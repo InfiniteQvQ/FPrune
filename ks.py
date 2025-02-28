@@ -1,5 +1,4 @@
 import torch
-import powerlaw
 import numpy as np
 from transformers import AutoModelForCausalLM
 
@@ -11,10 +10,25 @@ def hill_estimator(weights, k=50):
     return alpha.item()
 
 def ks_test_powerlaw(weights):
-    """计算 PL_Alpha_KS 统计量，优化 GPU 计算"""
-    weights_np = weights.detach().cpu().float().numpy().flatten()  # 只在需要时拷贝
-    fit = powerlaw.Fit(weights_np, verbose=False)
-    return fit.alpha, fit.D  # 返回幂律指数 α 和 KS 统计量 D
+    """优化 KS 统计量计算，替代 powerlaw.Fit()"""
+    weights_np = weights.detach().cpu().float().numpy().flatten()
+    
+    # 经验分布函数 (ECDF)
+    empirical_cdf = np.sort(weights_np)
+    empirical_cdf = np.arange(1, len(empirical_cdf) + 1) / len(empirical_cdf)
+    
+    # 理论幂律分布 CDF
+    min_weight = np.min(weights_np)
+    power_cdf = (weights_np / min_weight) ** -1.5  # 近似幂律
+    power_cdf /= np.max(power_cdf)
+
+    # 计算 KS 统计量
+    ks_stat = np.max(np.abs(empirical_cdf - power_cdf))
+    
+    # 估计幂律指数 α
+    alpha_ks = 1 + (np.mean(np.log(weights_np / min_weight))) ** -1
+
+    return alpha_ks, ks_stat  # 返回幂律指数 α 和 KS 统计量 D
 
 def analyze_layer(layer, layer_idx, device):
     """计算单层 Transformer 的 7 个矩阵的 PL_Alpha_Hill 和 KS 统计量"""
