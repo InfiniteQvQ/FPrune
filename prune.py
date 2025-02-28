@@ -524,6 +524,17 @@ def ww_sparsity_llama2_7b_split(args, model, device=torch.device("cuda:0"),
                          for i in range(0, len(metrics), layer_num_in_block)]
         metrics = [i for i in block_metrics for j in range(layer_num_in_block)]
     print("ESD metric values after block_wise processing:", metrics)
+
+    scores = torch.tensor(metrics, dtype=torch.float32)
+    prunables_tensor = torch.tensor(prunables, dtype=torch.float32)
+    max_score = torch.max(scores)
+    min_score = torch.min(scores)
+    # 线性映射到 [s1, s2]
+    layerwise_pruning_ratios_esd = (((scores - min_score) / (max_score - min_score)) * (s2 - s1) + s1)
+    scaler = torch.sum(prunables_tensor) * args.sparsity_ratio / (torch.sum(prunables_tensor * layerwise_pruning_ratios_esd))
+    layerwise_pruning_ratios_esd = layerwise_pruning_ratios_esd * scaler
+    layerwise_pruning_ratios_esd = layerwise_pruning_ratios_esd.cpu().numpy().tolist()
+    print("ESD-based ratios:", layerwise_pruning_ratios_esd)
     fisher_scores_flat = np.array([
         3.109375, 2.5625, 39.46875, 59.4375, 31.40625, 35.09375, 62.9375,
         6.4765625, 6.58203125, 52.84375, 51.0625, 65.3125, 76.8125, 101.6875,
@@ -574,7 +585,7 @@ def ww_sparsity_llama2_7b_split(args, model, device=torch.device("cuda:0"),
         inv_mapped = 1.0 / (mapped_fisher + ep)
         inv_norm = inv_mapped / inv_mapped.sum()
         # 该层整体剪枝比例（由 ESD 得到）
-        layer_prune_ratio = metrics[7*i]
+        layer_prune_ratio = layerwise_pruning_ratios_esd[7*i]
         # 将整体剪枝比例按倒数归一化的权重进行分配
         module_prune_ratio = inv_norm * layer_prune_ratio
         module_prune_allocations.append(module_prune_ratio)
