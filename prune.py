@@ -571,7 +571,7 @@ def ww_sparsity_llama2_7b_split(args, model, device=torch.device("cuda:0"),
     ])
     num_layers = 32
     num_modules = 7
-    fisher_scores = fisher_scores_flat.reshape(num_layers, num_modules)
+   # fisher_scores = fisher_scores_flat.reshape(num_layers, num_modules)
     ep = 1e-8
     module_prune_allocations = []  # 存储每层内部各模块的剪枝比例分配
     s1 = 0.9
@@ -586,7 +586,7 @@ def ww_sparsity_llama2_7b_split(args, model, device=torch.device("cuda:0"),
 
         min_f = layer_fisher.min()
         max_f = layer_fisher.max()
-        mapped_fisher = ((layer_fisher - min_f) / (max_f - min_f + ep)) * (s2 - s1) + s1
+        mapped_fisher = (((layer_fisher - min_f) / (max_f - min_f)) * (s2 - s1) + s1)
 
         # 为了让 Fisher 分数高的模块（mapped 值大）剪枝少，我们取其倒数
         inv_mapped = 1.0 / (mapped_fisher + ep)
