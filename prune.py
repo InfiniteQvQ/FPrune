@@ -574,8 +574,8 @@ def ww_sparsity_llama2_7b_split(args, model, device=torch.device("cuda:0"),
     fisher_scores = fisher_scores_flat.reshape(num_layers, num_modules)
     ep = 1e-8
     module_prune_allocations = []  # 存储每层内部各模块的剪枝比例分配
-    s1 = 0.8
-    s2 = 0.99
+    s1 = 0.9
+    s2 = 1
     for i in range(num_layers):
         # 取出第 i 层 7 个模块的 Fisher 分数
         layer_fisher = fisher_scores[i]  # shape: (7,)
