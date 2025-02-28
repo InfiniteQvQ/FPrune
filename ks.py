@@ -2,20 +2,31 @@ import torch
 import weightwatcher as ww
 from transformers import AutoModelForCausalLM
 
+import weightwatcher as ww
+
 def analyze_layer_weightwatcher(layer, layer_idx):
-    """使用 weightwatcher 计算 PL_Alpha_Hill 并查看可用数据列"""
+    """使用 weightwatcher 计算 PL_Alpha_Hill 和 KS 统计量"""
     watcher = ww.WeightWatcher()
     details = watcher.analyze(layer, min_evals=3, randomize=False)  # 自动分析权重
     
-    print(f"Layer {layer_idx} Details:\n", details.columns)  # 打印所有列
+    # 打印所有可用列，确保 log_norm 存在
+    print(f"Layer {layer_idx} Details:\n", details.columns)
     
-    if "lognorm" not in details.columns:
-        print(f"⚠️ Warning: 'lognorm' not found in weightwatcher details for Layer {layer_idx}")
+    if "alpha_weighted" in details.columns:
+        alpha_hill = details["alpha_weighted"].mean()  # 计算幂律指数
+    elif "alpha" in details.columns:
+        alpha_hill = details["alpha"].mean()  # 备用方案
+    else:
+        alpha_hill = float('nan')
 
-    # 计算幂律指数（如果有 "alpha" 列）
-    alpha_hill = details["alpha"].mean() if "alpha" in details.columns else float('nan')
+    if "log_norm" in details.columns:
+        ks_stat = details["log_norm"].mean()  # 代替 KS D
+    else:
+        ks_stat = float('nan')
 
-    return alpha_hill
+    print(f"Layer {layer_idx}: PL_Alpha_Hill={alpha_hill:.4f}, KS D={ks_stat:.4f}")
+    return float(alpha_hill), float(ks_stat)  # 确保返回可解包的 tuple
+
 
 def analyze_llama7b(model_name="meta-llama/Llama-7b-hf", device="cuda"):
     """计算 LLaMA-7B 每层的 PL_Alpha_Hill 和 KS 统计量（用 weightwatcher）"""
