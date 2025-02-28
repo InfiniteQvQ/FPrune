@@ -2,83 +2,101 @@ import torch
 import numpy as np
 from transformers import AutoModelForCausalLM, LlamaTokenizer
 
-# Load LLaMA 7B model
-cache_dir = "/root/autodl-tmp/llm_weights"
-model = AutoModelForCausalLM.from_pretrained(
-    "pinkmanlove/llama-7b-hf",
-    cache_dir=cache_dir,
-    device_map="auto",  # Auto-distribute across GPUs
-    torch_dtype=torch.float16
-)
 
-# Load tokenizer (ensure consistency with the model)
-tokenizer = LlamaTokenizer.from_pretrained("HuggingFaceM4/llama-7b-tokenizer")
 
-# Set model to training mode
-model.train()
 
-# Prepare input data
-text_list = [
-    "Hello, this is a test input for pruning.",
-    "The quick brown fox jumps over the lazy dog.",
-    "Artificial Intelligence is transforming the world.",
-    "In a distant future, humans and AI coexist in harmony.",
-    "OpenAI's ChatGPT demonstrates impressive reasoning capabilities.",
-    "Large Language Models have revolutionized natural language processing."
-]
+# 设置超参数
+ATTN_WEIGHT = 1.5  # Q, K, V 的权重
+MLP_WEIGHT = 1.0  # O, Gate, Up, Down 的权重
+S1 = 0.9  # 线性映射下限
+S2 = 1.0  # 线性映射上限
+EP = 1e-8  # 防止除零
 
-# Tokenize multiple texts at once
-inputs = tokenizer(text_list, return_tensors="pt", padding=True, truncation=True)
+def compute_attention_importance(model, dataloader, device):
+    """计算 Transformer Q, K, V 的注意力重要性"""
+    num_layers = len(model.model.layers)
+    module_importance = {"q_proj": np.zeros(num_layers), "k_proj": np.zeros(num_layers), "v_proj": np.zeros(num_layers)}
 
-# Move inputs to the same device as model layers
-inputs = {key: value.to(model.device) for key, value in inputs.items()}
+    with torch.no_grad():
+        for batch in dataloader:
+            inputs = batch.to(device)
+            outputs = model(inputs, output_attentions=True)
+            attentions = outputs.attentions  # shape: (num_layers, batch_size, num_heads, seq_len, seq_len)
 
-# Forward pass with loss computation
-outputs = model.forward(**inputs, labels=inputs["input_ids"])  # Ensure inputs align with model device
-loss = outputs.loss
-loss.backward()  # Compute gradients
+            for layer_idx, layer_attention in enumerate(attentions):
+                layer_attn_scores = layer_attention.mean(dim=(0, 2, 3)).cpu().numpy()
+                module_importance["q_proj"][layer_idx] += layer_attn_scores.mean()
+                module_importance["k_proj"][layer_idx] += layer_attn_scores.mean()
+                module_importance["v_proj"][layer_idx] += layer_attn_scores.mean()
 
-# Fisher importance storage
-fisher_scores = []
-fisher_per_layer = {
-    "q_proj": [],
-    "k_proj": [],
-    "v_proj": [],
-    "o_proj": [],
-    "gate_proj": [],
-    "up_proj": [],
-    "down_proj": [],
-}
+    for key in module_importance.keys():
+        module_importance[key] /= len(dataloader)
+    return module_importance
 
-# Iterate through Transformer layers in LLaMA
-for layer_idx, layer in enumerate(model.model.layers):
-    target_layers = {
-        "q_proj": layer.self_attn.q_proj,  # Q projection
-        "k_proj": layer.self_attn.k_proj,  # K projection
-        "v_proj": layer.self_attn.v_proj,  # V projection
-        "o_proj": layer.self_attn.o_proj,  # Output projection
-        "gate_proj": layer.mlp.gate_proj,  # Gated MLP projection
-        "up_proj": layer.mlp.up_proj,      # Up projection
-        "down_proj": layer.mlp.down_proj,  # Down projection
-    }
+def compute_module_gradient_sensitivity(model):
+    """计算 Transformer O, Gate, Up, Down 的梯度敏感性"""
+    sensitivity_scores = {"o_proj": [], "gate_proj": [], "up_proj": [], "down_proj": []}
 
-    for name, module in target_layers.items():
-        if module.weight.grad is not None:
-            fisher_score = torch.abs(module.weight * module.weight.grad).sum().item()
-            fisher_scores.append(fisher_score)
-            fisher_per_layer[name].append(fisher_score)
+    for layer in model.model.layers:
+        module_scores = {}
+        for name, module in layer.named_modules():
+            if any(key in name for key in sensitivity_scores.keys()):
+                if module.weight.grad is not None:
+                    score = torch.sum(torch.abs(module.weight * module.weight.grad)).item()
+                    module_scores[name] = score
 
-# Convert to NumPy array
-fisher_scores = np.array(fisher_scores)
+        total = sum(module_scores.values()) + EP
+        for key in module_scores:
+            module_scores[key] /= total
 
-# Compute average Fisher score for each module type
-average_fisher_scores = {key: np.mean(values) for key, values in fisher_per_layer.items()}
+        for key in sensitivity_scores.keys():
+            sensitivity_scores[key].append(module_scores.get(key, 0))
+    return sensitivity_scores
 
-# Save Fisher scores to a file (optional)
-np.save("llama_7b_fisher.npy", fisher_scores)
+def compute_importance_scores(model, dataloader, device):
+    """计算最终的重要性分数，输出 1D 数组"""
+    num_layers = len(model.model.layers)
+    attn_scores = compute_attention_importance(model, dataloader, device)
+    grad_scores = compute_module_gradient_sensitivity(model)
 
-# Print results
-print("Fisher Scores (1D Array, first 10 values):", fisher_scores)  # Show first 10 values
-print("\nAverage Fisher Scores per Layer Type:")
-for key, value in average_fisher_scores.items():
-    print(f"{key}: {value:.4f}")
+    importance_scores = []
+    for i in range(num_layers):
+        layer_attn = np.array([attn_scores["q_proj"][i], attn_scores["k_proj"][i], attn_scores["v_proj"][i]])
+        min_attn, max_attn = layer_attn.min(), layer_attn.max()
+        mapped_attn = ((layer_attn - min_attn) / (max_attn - min_attn + EP)) * (S2 - S1) + S1
+        mapped_attn *= ATTN_WEIGHT
+
+        layer_grad = np.array([grad_scores["o_proj"][i], grad_scores["gate_proj"][i], 
+                               grad_scores["up_proj"][i], grad_scores["down_proj"][i]])
+        min_grad, max_grad = layer_grad.min(), layer_grad.max()
+        mapped_grad = ((layer_grad - min_grad) / (max_grad - min_grad + EP)) * (S2 - S1) + S1
+        mapped_grad *= MLP_WEIGHT
+
+        combined_scores = np.concatenate([mapped_attn, mapped_grad])
+        importance_scores.extend(combined_scores)
+    
+    return np.array(importance_scores)
+
+if __name__ == "__main__":
+    # 假设 model 和 dataloader 已经初始化
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    # Load LLaMA 7B model
+    cache_dir = "/root/autodl-tmp/llm_weights"
+    model = AutoModelForCausalLM.from_pretrained(
+        "pinkmanlove/llama-7b-hf",
+        cache_dir=cache_dir,
+        device_map="auto",  # Auto-distribute across GPUs
+        torch_dtype=torch.float16
+    )
+
+    # Load tokenizer (ensure consistency with the model)
+    tokenizer = LlamaTokenizer.from_pretrained("HuggingFaceM4/llama-7b-tokenizer")
+    
+    # 生成一个测试样本
+    text = "Hello, this is a test input for importance computation."
+    inputs = tokenizer(text, return_tensors="pt").to(device)
+    dataloader = [inputs]  # 这里假设 dataloader 只有一个 batch
+    
+    importance_scores = compute_importance_scores(model, dataloader, device)
+    np.save("importance_scores.npy", importance_scores)
+    print("Importance scores saved to importance_scores.npy")
