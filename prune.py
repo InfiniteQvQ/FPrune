@@ -577,35 +577,34 @@ def ww_sparsity_llama2_7b_split(args, model, device=torch.device("cuda:0"),
     s1 = 0.8
     s2 = 1
     metrics = np.load(f"{args.ww_metric_cache}/{args.ww_metric}.npy")
-    fisher_scores = metrics.reshape(num_layers, num_modules)
+    esd_scores = metrics.reshape(num_layers, num_modules)  # 重新整理成 (num_layers, num_modules) 形状
+
     for i in range(num_layers):
-        # 取出第 i 层 7 个模块的 Fisher 分数
-        layer_fisher = fisher_scores[i]  # shape: (7,)
-        # 对这一层内的 Fisher 分数进行线性映射到 [s1, s2]
-        # 设定目标区间
+        # 取出第 i 层 7 个模块的 ESD 分数
+        layer_esd = esd_scores[i]  # shape: (7,)
 
-        min_f = layer_fisher.min()
-        max_f = layer_fisher.max()
-        mapped_fisher = (((max_f - min_f) /(layer_fisher - min_f) ) * (s2 - s1) + s1)
+        # **第一步**：对 ESD 进行线性映射到 [s1, s2]
+        min_f = layer_esd.min()
+        max_f = layer_esd.max()
+        mapped_esd = ((layer_esd - min_f) / (max_f - min_f + ep)) * (s2 - s1) + s1
+        # 这里的 mapped_esd 越大，表示剪枝比例越大
 
-        # 为了让 Fisher 分数高的模块（mapped 值大）剪枝少，我们取其倒数
-        inv_mapped = 1.0 / (mapped_fisher + ep)
-        # 归一化倒数权重，使得各模块权重之和为 1
-        inv_norm = inv_mapped / inv_mapped.sum()
+        # **第二步**：归一化，使得 7 个模块的权重之和为 1
+        norm_mapped = mapped_esd / mapped_esd.sum()
 
-        # 这里 layer_prune_ratio[i] 是该层整体剪枝比例（例如 0.7）
-        # 如果直接乘 inv_norm，则各模块之和为 0.7，平均为 0.7/7 ≈ 0.1
-        # 我们希望 7 个模块的平均仍为 0.7，也就是说总和应为 7 * 0.7
-        # 因此这里乘上 num_modules
-        module_prune_ratio = inv_norm * (num_modules * layerwise_pruning_ratios_esd[i*7])
+        # **第三步**：保持该层剪枝比例均值 = `layerwise_pruning_ratios_esd[i]`
+        # `layerwise_pruning_ratios_esd[i*7]` 代表该层的目标剪枝比例（例如 0.7）
+        target_prune_ratio = layerwise_pruning_ratios_esd[i * 7]  # 该层的目标剪枝比例
+        module_prune_ratio = norm_mapped * (num_modules * target_prune_ratio)  # 使得均值等于 target_prune_ratio
+
         module_prune_allocations.append(module_prune_ratio)
 
-    module_prune_allocations = np.array(module_prune_allocations)
-    print("每层各模块的剪枝比例分配（每行依次对应 Q, K, V, O, gate, up, down）：")
-    for i, alloc in enumerate(module_prune_allocations):
-        print(f"Layer {i+1:02d}: " + ", ".join(f"{ratio:.4f}" for ratio in alloc))
-    flat_allocations = module_prune_allocations.flatten()
-    return flat_allocations
+    # **最终转换为 1D 数组**
+    module_prune_allocations = np.array(module_prune_allocations).flatten()  # 变成 1D 数组
+
+    # **打印检查**
+    print("Flattened module-wise pruning allocations:", module_prune_allocations)
+    return module_prune_allocations
     
 
 
