@@ -1,109 +1,59 @@
 import torch
 import numpy as np
+import matplotlib.pyplot as plt
 from transformers import AutoModelForCausalLM, LlamaTokenizer
 
-# 超参数
-ATTN_WEIGHT = 1.5   # Q, K, V 的权重
-MLP_WEIGHT = 1.0    # Out, Gate, Up, Down 的权重
-EP = 1e-8           # 防止除零
+# 设置设备
+device = "cuda" if torch.cuda.is_available() else "cpu"
 
-# ==================== 计算 QKV 注意力重要性 ====================
-def compute_attention_importance(model, dataloader, device):
-    """分别计算 Transformer Q, K, V 的注意力重要性"""
-    num_layers = len(model.model.layers)
-    module_importance = {"q_proj": np.zeros(num_layers), "k_proj": np.zeros(num_layers), "v_proj": np.zeros(num_layers)}
+# 加载 LLaMA 模型和 tokenizer
+cache_dir = "/root/autodl-tmp/llm_weights"
+model = AutoModelForCausalLM.from_pretrained(
+    "pinkmanlove/llama-7b-hf",
+    cache_dir=cache_dir,
+    device_map="auto",
+    torch_dtype=torch.float16
+)
+model.to(device)
 
-    with torch.no_grad():
-        for batch in dataloader:
-            inputs = {k: v.to(device) for k, v in batch.items()}
-            outputs = model(**inputs, output_attentions=True)
-            attentions = outputs.attentions  # shape: (num_layers, batch_size, num_heads, seq_len, seq_len)
+tokenizer = LlamaTokenizer.from_pretrained("HuggingFaceM4/llama-7b-tokenizer")
 
-            for layer_idx in range(num_layers):
-                attn = attentions[layer_idx].mean(dim=(0, 3))  # 对 batch 维度和 seq_len 维度取均值
-                module_importance["q_proj"][layer_idx] += attn[0].mean().item()  # 取第 1 个 head
-                module_importance["k_proj"][layer_idx] += attn[1].mean().item()  # 取第 2 个 head
-                module_importance["v_proj"][layer_idx] += attn[2].mean().item()  # 取第 3 个 head
+# 准备输入
+text = "Hello, this is a test input for importance computation."
+inputs = tokenizer(text, return_tensors="pt").to(device)
 
-    for key in module_importance.keys():
-        module_importance[key] /= len(dataloader)
-    return module_importance
+# 启用梯度计算
+for param in model.parameters():
+    param.requires_grad = True
 
-# ==================== 计算 Fisher 信息矩阵 (Out, Gate, Up, Down) ====================
-def compute_fisher_information(model, inputs, labels, module_keys, device):
-    """计算 Transformer Out, Gate, Up, Down 的 Fisher 信息"""
-    model.zero_grad()
-    outputs = model(**inputs)
-    loss_fct = torch.nn.CrossEntropyLoss()
-    logits = outputs.logits
-    loss = loss_fct(logits.view(-1, logits.size(-1)), labels.view(-1))  # 计算 loss
-    loss.backward()
+# 计算前向传播
+outputs = model(**inputs)
+loss = outputs.logits.mean()  # 这里用 logits 的均值作为损失函数，仅用于梯度计算
+loss.backward()
 
-    fisher_scores = {key: np.zeros(len(model.model.layers)) for key in module_keys}
-    for i, layer in enumerate(model.model.layers):
-        for key in module_keys:
-            param_list = [p for n, p in layer.named_parameters() if key in n and p.grad is not None]
-            if len(param_list) > 0:
-                fisher_values = [torch.mean(p.grad ** 2).item() for p in param_list]  # 计算 Fisher 信息
-                fisher_scores[key][i] = np.sum(fisher_values)  # 不取均值，直接求和，保持数值差异
+# 计算梯度范数
+module_keys = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+num_layers = len(model.model.layers)
+grad_norms = {key: np.zeros(num_layers) for key in module_keys}
 
-    return fisher_scores
+for i in range(num_layers):
+    layer_key = f"model.layers.{i}"
+    for key in module_keys:
+        # 找到该层中属于 key 的所有参数，并计算梯度范数
+        layer_params = [param.grad for name, param in model.named_parameters()
+                        if layer_key in name and key in name and param.grad is not None]
+        if len(layer_params) > 0:
+            grad_norms[key][i] = np.mean([torch.norm(p, p=2).item() for p in layer_params])
+        else:
+            grad_norms[key][i] = 0  # 如果该层没有这个模块，则设为 0
 
-# ==================== 组合最终分数 ====================
-def combine_scores(attn_scores, fisher_scores):
-    """不归一化，直接组合"""
-    num_layers = len(attn_scores["q_proj"])
-    importance_matrix = np.zeros((num_layers, 7))
+# 归一化梯度范数（防止极端值影响）
+for key in grad_norms:
+    max_val = np.max(grad_norms[key])
+    if max_val > 0:
+        grad_norms[key] /= max_val
 
-    for i in range(num_layers):
-        importance_matrix[i, 0] = attn_scores["q_proj"][i] * ATTN_WEIGHT
-        importance_matrix[i, 1] = attn_scores["k_proj"][i] * ATTN_WEIGHT
-        importance_matrix[i, 2] = attn_scores["v_proj"][i] * ATTN_WEIGHT
-        importance_matrix[i, 3] = fisher_scores["o_proj"][i] * MLP_WEIGHT
-        importance_matrix[i, 4] = fisher_scores["gate_proj"][i] * MLP_WEIGHT
-        importance_matrix[i, 5] = fisher_scores["up_proj"][i] * MLP_WEIGHT
-        importance_matrix[i, 6] = fisher_scores["down_proj"][i] * MLP_WEIGHT
-
-    return importance_matrix
-
-# ==================== 主函数 ====================
-if __name__ == "__main__":
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    # 加载 LLaMA 7B 模型
-    cache_dir = "/root/autodl-tmp/llm_weights"
-    model = AutoModelForCausalLM.from_pretrained(
-        "pinkmanlove/llama-7b-hf",
-        cache_dir=cache_dir,
-        device_map="auto",  # 自动分布到多个 GPU
-        torch_dtype=torch.float16
-    )
-
-    # 加载 tokenizer
-    tokenizer = LlamaTokenizer.from_pretrained("HuggingFaceM4/llama-7b-tokenizer")
-
-    # 生成一个测试样本
-    text = "Hello, this is a test input for importance computation."
-    inputs = tokenizer(text, return_tensors="pt")
-    inputs = {k: v.to(device) for k, v in inputs.items()}
-
-    # 生成 ground-truth（让模型预测下一个 token）
-    labels = inputs["input_ids"]
-
-    # 构造 dataloader
-    dataloader = [inputs]
-
-    # 计算 Q, K, V 注意力重要性
-    attn_scores = compute_attention_importance(model, dataloader, device)
-
-    # 计算 Fisher 信息矩阵
-    module_keys = ["o_proj", "gate_proj", "up_proj", "down_proj"]
-    fisher_scores = compute_fisher_information(model, inputs, labels, module_keys, device)
-
-    # 组合最终重要性分数 (不归一化)
-    importance_matrix = combine_scores(attn_scores, fisher_scores)
-
-    # 保存重要性分数
-    np.save("importance_scores.npy", importance_matrix)
-    print("Importance scores saved to importance_scores.npy")
-    print(importance_matrix)
+print(grad_norms)
+# 保存结果
+np.save("llama_component_grad_norms.npy", grad_norms)
+print("Gradient norm importance scores saved to llama_component_grad_norms.npy")
