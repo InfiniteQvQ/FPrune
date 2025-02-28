@@ -119,4 +119,5 @@ if __name__ == "__main__":
     
     importance_scores = compute_importance_scores(model, dataloader, device)
     np.save("importance_scores.npy", importance_scores)
+    print(importance_scores)
     print("Importance scores saved to importance_scores.npy")
