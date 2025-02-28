@@ -2,125 +2,124 @@ import torch
 import numpy as np
 from transformers import AutoModelForCausalLM, LlamaTokenizer
 
-# 超参数：用于线性映射和防止除零
-S1 = 0.9
-S2 = 1.0
-EP = 1e-8
+# 超参数
+ATTN_WEIGHT = 1.5   # Q, K, V 的权重
+MLP_WEIGHT = 1.0    # Out, Gate, Up, Down 的权重
+S1 = 0.9            # 线性映射下限
+S2 = 1.0            # 线性映射上限
+EP = 1e-8           # 防止除零
 
-def compute_finite_difference_sensitivity(model, inputs, module_key, epsilon=1e-5):
-    """
-    对于模型中名称包含 module_key 的参数，利用有限差分法计算敏感性指标。
-    具体做法是：对该模块的参数加上微小扰动，然后计算模型输出（例如 logits）的变化幅度。
-    
-    返回一个字典，键为参数名称，值为该参数扰动后模型输出变化的归一化指标。
-    """
-    # 保存模型原始输出（这里选择 logits 作为输出）
-    outputs_original = model(**inputs).logits.detach()
-    # 记录所有敏感性指标
-    sensitivities = {}
-    
-    # 遍历模型所有参数
-    for name, param in model.named_parameters():
-        if module_key in name:
-            # 保存原始参数
-            original = param.data.clone()
-            # 为了确保数值稳定，先将参数置为 float32 计算敏感性
-            param.data = param.data.float()
-            # 对参数加上 epsilon 扰动（这里采用正向扰动，可以扩展为正负扰动的平均）
-            param.data.add_(epsilon)
-            # 计算扰动后的输出
-            outputs_perturbed = model(**inputs).logits.detach()
-            # 计算输出变化（例如采用 Frobenius 范数衡量所有输出变化）
-            delta = torch.norm(outputs_perturbed - outputs_original)
-            # 将变化值归一化（例如除以 epsilon，使其近似于数值梯度的范数）
-            sensitivity = delta / epsilon
-            sensitivities[name] = sensitivity.item()
-            # 恢复原始参数
-            param.data.copy_(original)
-    
-    return sensitivities
-
-def compute_all_module_sensitivities(model, inputs, module_keys):
-    """
-    对给定的多个 module_key（例如 ["o_proj", "gate_proj", "up_proj", "down_proj"]），
-    计算各模块基于有限差分的敏感性指标，并对每层进行归一化。
-    
-    返回一个字典：键为模块名称，值为每层的敏感性数组（每层一个数值）。
-    """
-    # 初始化字典，假设模型有 L 层
+# ==================== 计算 QKV 注意力重要性 ====================
+def compute_attention_importance(model, dataloader, device):
+    """计算 Transformer Q, K, V 的注意力重要性"""
     num_layers = len(model.model.layers)
-    sensitivity_scores = {key: [0] * num_layers for key in module_keys}
-    
-    # 对 dataloader 的一个 batch 计算（确保 inputs 在 device 上）
-    for key in module_keys:
-        # 对每个模块 key，在各个层中寻找参数（假设参数名称中包含 "model.layers.{i}"）
-        for i in range(num_layers):
-            layer_key = f"model.layers.{i}"
-            # 筛选出属于当前层且名称中包含 module key 的参数
-            layer_params = {name: param for name, param in model.named_parameters()
-                            if layer_key in name and key in name}
-            if len(layer_params) == 0:
-                # 如果当前层没有找到对应模块，记录为 0
-                sensitivity_scores[key][i] = 0.0
-            else:
-                # 对当前层的每个参数分别计算敏感性，然后取平均
-                sens_list = []
-                for name, param in layer_params.items():
-                    sens = compute_finite_difference_sensitivity(model, inputs, name, epsilon=1e-5)
-                    # 这里 sens 是一个字典，但由于只针对当前参数，取该参数对应的数值
-                    if name in sens:
-                        sens_list.append(sens[name])
-                # 如果 sens_list 非空，则取平均，否则为 0
-                if sens_list:
-                    sensitivity_scores[key][i] = np.mean(sens_list)
-                else:
-                    sensitivity_scores[key][i] = 0.0
-    return sensitivity_scores
+    module_importance = {"q_proj": np.zeros(num_layers), "k_proj": np.zeros(num_layers), "v_proj": np.zeros(num_layers)}
 
+    with torch.no_grad():
+        for batch in dataloader:
+            inputs = {k: v.to(device) for k, v in batch.items()}
+            outputs = model(**inputs, output_attentions=True)
+            attentions = outputs.attentions  # shape: (num_layers, batch_size, num_heads, seq_len, seq_len)
+
+            for layer_idx, layer_attention in enumerate(attentions):
+                layer_attn_scores = layer_attention.mean(dim=(0, 2, 3)).cpu().numpy()
+                module_importance["q_proj"][layer_idx] += layer_attn_scores.mean()
+                module_importance["k_proj"][layer_idx] += layer_attn_scores.mean()
+                module_importance["v_proj"][layer_idx] += layer_attn_scores.mean()
+
+    for key in module_importance.keys():
+        module_importance[key] /= len(dataloader)
+    return module_importance
+
+# ==================== 计算 Fisher 信息矩阵 (Out, Gate, Up, Down) ====================
+def compute_fisher_information(model, inputs, labels, module_keys, device):
+    """计算 Transformer Out, Gate, Up, Down 的 Fisher 信息矩阵"""
+    model.zero_grad()
+    outputs = model(**inputs)
+    loss_fct = torch.nn.CrossEntropyLoss()
+    logits = outputs.logits
+    loss = loss_fct(logits.view(-1, logits.size(-1)), labels.view(-1))  # 计算 loss
+    loss.backward()
+
+    fisher_scores = {key: [] for key in module_keys}
+    for i, layer in enumerate(model.model.layers):
+        module_scores = {}
+        for name, param in layer.named_parameters():
+            for key in fisher_scores.keys():
+                if key in name and param.grad is not None:
+                    fisher = torch.mean(param.grad ** 2).item()  # 计算 Fisher 信息
+                    module_scores[key] = fisher
+
+        total = sum(module_scores.values()) + EP
+        for key in fisher_scores.keys():
+            fisher_scores[key].append(module_scores.get(key, 0) / total)
+    return fisher_scores
+
+# ==================== 归一化并组合最终分数 ====================
+def normalize_and_combine(attn_scores, fisher_scores):
+    """对 QKV 和 Out, Gate, Up, Down 进行归一化并组合"""
+    num_layers = len(attn_scores["q_proj"])  # Llama 7B 共有 32 层
+    importance_scores = []
+
+    for i in range(num_layers):
+        # 归一化 Q, K, V
+        layer_attn = np.array([attn_scores["q_proj"][i], attn_scores["k_proj"][i], attn_scores["v_proj"][i]])
+        min_attn, max_attn = layer_attn.min(), layer_attn.max()
+        mapped_attn = ((layer_attn - min_attn) / (max_attn - min_attn + EP)) * (S2 - S1) + S1
+        mapped_attn *= ATTN_WEIGHT
+
+        # 归一化 Out, Gate, Up, Down
+        layer_fisher = np.array([fisher_scores["o_proj"][i], fisher_scores["gate_proj"][i],
+                                 fisher_scores["up_proj"][i], fisher_scores["down_proj"][i]])
+        min_fisher, max_fisher = layer_fisher.min(), layer_fisher.max()
+        mapped_fisher = ((layer_fisher - min_fisher) / (max_fisher - min_fisher + EP)) * (S2 - S1) + S1
+        mapped_fisher *= MLP_WEIGHT
+
+        # 拼接每层的 7 个分数（Q, K, V, O, Gate, Up, Down）
+        combined_scores = np.concatenate([mapped_attn, mapped_fisher])
+        importance_scores.extend(combined_scores)
+
+    return np.array(importance_scores)
+
+# ==================== 主函数 ====================
 if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    
-    # 加载模型和 tokenizer（请根据实际情况修改模型名称和路径）
+
+    # 加载 LLaMA 7B 模型
     cache_dir = "/root/autodl-tmp/llm_weights"
     model = AutoModelForCausalLM.from_pretrained(
         "pinkmanlove/llama-7b-hf",
         cache_dir=cache_dir,
-        device_map="auto",
+        device_map="auto",  # 自动分布到多个 GPU
         torch_dtype=torch.float16
     )
-    model.to(device)
-    
+
+    # 加载 tokenizer
     tokenizer = LlamaTokenizer.from_pretrained("HuggingFaceM4/llama-7b-tokenizer")
-    
-    # 构造输入
-    text = "Hello, this is a test input for sensitivity computation."
+
+    # 生成一个测试样本
+    text = "Hello, this is a test input for importance computation."
     inputs = tokenizer(text, return_tensors="pt")
     inputs = {k: v.to(device) for k, v in inputs.items()}
-    
-    # 我们希望计算以下模块的敏感性
+
+    # 生成 ground-truth（让模型预测下一个 token）
+    labels = inputs["input_ids"]
+
+    # 构造 dataloader
+    dataloader = [inputs]
+
+    # 计算 Q, K, V 注意力重要性
+    attn_scores = compute_attention_importance(model, dataloader, device)
+
+    # 计算 Fisher 信息矩阵
     module_keys = ["o_proj", "gate_proj", "up_proj", "down_proj"]
-    
-    # 计算有限差分敏感性
-    sensitivities = compute_all_module_sensitivities(model, inputs, module_keys)
-    
-    # 为方便观察，可以对每层的各模块敏感性归一化映射到 [S1, S2]
-    mapped_sensitivities = {}
-    for key, scores in sensitivities.items():
-        arr = np.array(scores)
-        min_val, max_val = arr.min(), arr.max()
-        mapped = ((arr - min_val) / (max_val - min_val + EP)) * (S2 - S1) + S1
-        mapped_sensitivities[key] = mapped
-    
-    # 拼接每层的敏感性分数（假设模型有 L 层，每层4个指标）
-    num_layers = len(model.model.layers)
-    final_scores = []
-    for i in range(num_layers):
-        layer_scores = []
-        for key in module_keys:
-            layer_scores.append(mapped_sensitivities[key][i])
-        final_scores.extend(layer_scores)
-    
-    final_scores = np.array(final_scores)
-    np.save("importance_scores.npy", final_scores)
-    print("Importance scores (finite-difference based) saved to importance_scores.npy")
-    print(final_scores)
+    fisher_scores = compute_fisher_information(model, inputs, labels, module_keys, device)
+
+    # 归一化并组合最终的 7×32 分数
+    importance_scores = normalize_and_combine(attn_scores, fisher_scores)
+
+    # 保存重要性分数
+    np.save("importance_scores.npy", importance_scores)
+    print(importance_scores)
+    print("Importance scores saved to importance_scores.npy")
+    print(importance_scores)
