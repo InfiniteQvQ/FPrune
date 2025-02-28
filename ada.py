@@ -1,5 +1,5 @@
 import torch
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, LlamaTokenizer
 
 # -----------------------------
 # 1. 加载 LLaMA 7B 模型（从本地路径）
@@ -11,6 +11,9 @@ model = AutoModelForCausalLM.from_pretrained(
     device_map="auto",
     torch_dtype=torch.float16
 )
+tokenizer_name = "HuggingFaceM4/llama-7b-tokenizer"
+tokenizer = LlamaTokenizer.from_pretrained(tokenizer_name)
+
 model.eval()
 # 为了数值稳定，转为 FP32 进行 Hessian 计算
 model = model.float()
