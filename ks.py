@@ -10,9 +10,10 @@ def analyze_layer_weightwatcher(layer, layer_idx):
     # 打印所有可用列，确保 log_norm 存在
     print(f"Layer {layer_idx} Details:\n", details.columns)
     
-    # 计算 KS 统计量
+    # 计算 KS 统计量（归一化处理）
     if "log_norm" in details.columns:
         ks_stat = details["log_norm"].mean()
+        ks_stat = ks_stat / details["log_norm"].max()  # 归一化
     else:
         ks_stat = float('nan')
 
