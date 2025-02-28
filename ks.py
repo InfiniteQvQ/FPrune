@@ -14,13 +14,17 @@ model = AutoModelForCausalLM.from_pretrained(
     device_map="auto",
     torch_dtype=torch.float16
 )
-model.to(device)
+# 强制所有参数和输入到同一设备
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+model.to(device)  # 确保整个模型在 cuda:0
+# 确保输入也在 cuda:0
+
 
 tokenizer = LlamaTokenizer.from_pretrained("HuggingFaceM4/llama-7b-tokenizer")
 
 # 准备输入
 text = "Hello, this is a test input for importance computation."
-inputs = tokenizer(text, return_tensors="pt").to(device)
+inputs = {k: v.to(device) for k, v in inputs.items()}  
 
 # 启用梯度计算
 for param in model.parameters():
