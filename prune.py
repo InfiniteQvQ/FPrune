@@ -573,21 +573,28 @@ def ww_sparsity_llama2_7b_split(args, model, device=torch.device("cuda:0"),
     num_modules = 7
     fisher_scores = fisher_scores_flat.reshape(num_layers, num_modules)
     ep = 1e-8
-    module_prune_allocations = []  # 存储每层内部各模块分配的剪枝比例
+    module_prune_allocations = []  # 存储每层内部各模块的剪枝比例分配
+
     for i in range(num_layers):
-        # 取出该层的 7 个模块的 Fisher 分数
-        layer_fisher = fisher_scores[i]
+        # 取出第 i 层 7 个模块的 Fisher 分数
+        layer_fisher = fisher_scores[i]  # shape: (7,)
+        # 对这一层内的 Fisher 分数进行线性映射到 [s1, s2]
+        # 设定目标区间
+
         min_f = layer_fisher.min()
         max_f = layer_fisher.max()
-        # 计算倒数（注意：Fisher 分数越高，倒数越低，表示该模块更重要，不宜剪得多）
         mapped_fisher = ((layer_fisher - min_f) / (max_f - min_f + ep)) * (s2 - s1) + s1
-        # 归一化使得各模块权重之和为 1
+
+        # 为了让 Fisher 分数高的模块（mapped 值大）剪枝少，我们取其倒数
         inv_mapped = 1.0 / (mapped_fisher + ep)
+        # 归一化倒数权重，使得各模块权重之和为 1
         inv_norm = inv_mapped / inv_mapped.sum()
-        # 该层整体剪枝比例（由 ESD 得到）
-        layer_prune_ratio = layerwise_pruning_ratios_esd[7*i]
-        # 将整体剪枝比例按倒数归一化的权重进行分配
-        module_prune_ratio = inv_norm * layer_prune_ratio
+
+        # 这里 layer_prune_ratio[i] 是该层整体剪枝比例（例如 0.7）
+        # 如果直接乘 inv_norm，则各模块之和为 0.7，平均为 0.7/7 ≈ 0.1
+        # 我们希望 7 个模块的平均仍为 0.7，也就是说总和应为 7 * 0.7
+        # 因此这里乘上 num_modules
+        module_prune_ratio = inv_norm * (num_modules * layerwise_pruning_ratios_esd[i*7])
         module_prune_allocations.append(module_prune_ratio)
 
     module_prune_allocations = np.array(module_prune_allocations)
