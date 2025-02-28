@@ -54,8 +54,10 @@ def main():
     tokenizer_name = "HuggingFaceM4/llama-7b-tokenizer"
 
     print("Loading model...")
+    cache_dir = "/root/autodl-tmp/llm_weights"
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
+        cache_dir=cache_dir,
         torch_dtype=torch.float16
     )
 
