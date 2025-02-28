@@ -1,47 +1,56 @@
 import torch
-import weightwatcher as ww
-from transformers import AutoModelForCausalLM
+import numpy as np
+from transformers import AutoModelForCausalLM, LlamaTokenizer
 
-def analyze_layer_weightwatcher(layer, layer_idx):
-    """使用 weightwatcher 计算 KS 统计量"""
-    watcher = ww.WeightWatcher()
-    details = watcher.analyze(layer, min_evals=3, randomize=False)  # 自动分析权重
-    
-    # 打印所有可用列，确保 log_norm 存在
-    print(f"Layer {layer_idx} Details:\n", details.columns)
-    
-    # 计算 KS 统计量（归一化处理）
-    if "log_norm" in details.columns:
-        ks_stat = details["log_norm"].mean()
-        ks_stat = ks_stat / details["log_norm"].max()  # 归一化
-    else:
-        ks_stat = float('nan')
+# 加载 LLaMA 7B 模型
+cache_dir = "/root/autodl-tmp/llm_weights"
+model = AutoModelForCausalLM.from_pretrained(
+    "pinkmanlove/llama-7b-hf",
+    cache_dir=cache_dir,
+    device_map="auto",
+    torch_dtype=torch.float16
+)
 
-    print(f"Layer {layer_idx}: KS D={ks_stat:.4f}")
-    return float(ks_stat)  # 只返回 KS 统计量
+tokenizer = LlamaTokenizer.from_pretrained("meta-llama/Llama-2-7b-hf")
 
-def analyze_llama7b(model_name="meta-llama/Llama-7b-hf", device="cuda"):
-    """计算 LLaMA-7B 每层的 KS 统计量（用 weightwatcher）"""
-    
-    cache_dir = "/root/autodl-tmp/llm_weights"
-    model = AutoModelForCausalLM.from_pretrained(
-        "pinkmanlove/llama-7b-hf",
-        cache_dir=cache_dir,
-        torch_dtype=torch.float16,
-        device_map="auto"
-    )
-    
-    ks_stats = []  # 仅存储 KS 统计量的列表
+# 选择 device
+device = "cuda" if torch.cuda.is_available() else "cpu"
+model.to(device)
+model.train()  # 需要开启训练模式以计算梯度
 
-    for layer_idx, layer in enumerate(model.model.layers):  # 遍历 LLaMA Transformer 层
-        ks_stat = analyze_layer_weightwatcher(layer, layer_idx)
-        ks_stats.append(ks_stat)
+# 准备输入数据（示例文本）
+text = "Hello, this is a test input for pruning."
+inputs = tokenizer(text, return_tensors="pt").to(device)
 
-    return ks_stats  # 仅返回 KS 统计量的列表
+# 计算前向传播和损失
+outputs = model(**inputs, labels=inputs["input_ids"])
+loss = outputs.loss
+loss.backward()  # 计算梯度
 
-if __name__ == "__main__":
-    ks_stats = analyze_llama7b(device="cuda")  # 使用 GPU 计算
+# 存储 Fisher 重要性的数组
+fisher_scores = []
 
-    # 打印最终 KS 统计量列表
-    print("\n🔥 Final KS Statistics (All Layers):")
-    print(ks_stats)
+# 遍历所有 Transformer 层
+for layer_idx, layer in enumerate(model.model.layers):
+    target_layers = [
+        layer.self_attn.q_proj,  # Q
+        layer.self_attn.k_proj,  # K
+        layer.self_attn.v_proj,  # V
+        layer.self_attn.o_proj,  # Output gate
+        layer.mlp.up_proj,  # Up
+        layer.mlp.down_proj,  # Down
+    ]
+
+    for module in target_layers:
+        if module.weight.grad is not None:
+            fisher_score = torch.abs(module.weight * module.weight.grad).sum().item()  # 计算 Fisher 重要性
+            fisher_scores.append(fisher_score)
+
+# 转换为 NumPy 数组
+fisher_scores = np.array(fisher_scores)
+
+# 保存 Fisher 数值到文件（可选）
+np.save("llama_7b_fisher.npy", fisher_scores)
+
+# 打印部分结果
+print("Fisher Scores (1D Array):", fisher_scores[:10])  # 仅显示前 10 个
