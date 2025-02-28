@@ -1,6 +1,5 @@
 import torch
 import numpy as np
-import matplotlib.pyplot as plt
 from transformers import AutoModelForCausalLM, LlamaTokenizer
 
 # **1. 设定设备**
@@ -13,14 +12,15 @@ model = AutoModelForCausalLM.from_pretrained(
     cache_dir=cache_dir,
     torch_dtype=torch.float16
 )
-model.to(device)
+model.to(device)  # **确保模型在 GPU**
 
 # **3. 加载 Tokenizer**
 tokenizer = LlamaTokenizer.from_pretrained("HuggingFaceM4/llama-7b-tokenizer")
 
 # **4. 构造输入**
 text = "Hello, this is a test input for importance computation."
-inputs = tokenizer(text, return_tensors="pt").to(device)
+inputs = tokenizer(text, return_tensors="pt")
+inputs = {k: v.to(device) for k, v in inputs.items()}  # **确保输入在 GPU**
 
 # **5. 启用梯度计算**
 for param in model.parameters():
@@ -43,7 +43,7 @@ for i in range(num_layers):
         layer_params = [param.grad for name, param in model.named_parameters()
                         if layer_key in name and key in name and param.grad is not None]
         if len(layer_params) > 0:
-            grad_norms[key][i] = np.mean([torch.norm(p, p=2).item() for p in layer_params])
+            grad_norms[key][i] = np.mean([torch.norm(p.to(device), p=2).item() for p in layer_params])  # **确保梯度计算在 GPU**
         else:
             grad_norms[key][i] = 0  # 如果该层没有这个模块，则设为 0
 
@@ -53,7 +53,9 @@ for key in grad_norms:
     if max_val > 0:
         grad_norms[key] /= max_val  # 归一化，确保不同模块之间的数值可比
 
+# **9. 打印数据**
 print(grad_norms)
+
 # **10. 保存数据**
 np.save("llama_component_grad_norms.npy", grad_norms)
 print("Gradient norm importance scores saved to llama_component_grad_norms.npy")
