@@ -523,81 +523,63 @@ def ww_sparsity_llama2_7b_split(args, model, device=torch.device("cuda:0"),
         block_metrics = [np.mean(metrics[i:i+layer_num_in_block]) 
                          for i in range(0, len(metrics), layer_num_in_block)]
         metrics = [i for i in block_metrics for j in range(layer_num_in_block)]
-    metrics = np.array(metrics)
-    esd_matrix = metrics.reshape((len(blocks), layer_num_in_block))  # 例如 (32, 7)
-    
-    # 根据 segmentation 进行 block-level平均（如果需要）
-    segmentation = {
-        0: [0],
-        1: [1],
-        2: [2, 3],
-        3: [4, 5, 6, 7, 8, 9, 10],
-        4: [11, 12],
-        5: [13, 14, 15],
-        6: [16],
-        7: [17, 18, 19],
-        8: [20],
-        9: [21, 22, 23, 24, 25, 26, 27],
-        10: [28],
-        11: [29],
-        12: [30],
-        13: [31]
-    }
-    result_matrix = np.zeros_like(esd_matrix)
-    for seg_id in sorted(segmentation.keys()):
-        layer_idxs = segmentation[seg_id]
-        seg_values = esd_matrix[layer_idxs, :]
-        seg_avg = np.mean(seg_values)
-        result_matrix[layer_idxs, :] = seg_avg
-    # 展平成 1D 数组，长度 = (层数 × 模块数)
-    final_esd = result_matrix.flatten()
-    print("Block-level averaged ESD scores (flattened):", final_esd)
-    
-    # Step 3: 线性映射得到原始每模块剪枝比例（基于 ESD 数值）
-    scores = torch.tensor(final_esd)
-    prunables_tensor = torch.tensor(prunables)  # 也应为长度 224
-    max_score = torch.max(scores)
-    min_score = torch.min(scores)
-    # 线性映射：低 ESD（重要性高）对应较低剪枝比例，反之较高剪枝比例
-    raw_module_ratios = (((scores - min_score) / (max_score - min_score)) * (s2 - s1) + s1)
-    scaler = torch.sum(prunables_tensor) * args.sparsity_ratio / (torch.sum(prunables_tensor * raw_module_ratios))
-    module_ratios = raw_module_ratios * scaler
-    module_ratios = module_ratios.cpu().numpy()  # shape (224,)
-    
-    # Step 4: 将 module_ratios reshape 成 (num_layers, num_modules)
-    num_layers = len(blocks)  # 例如 32
-    num_modules = layer_num_in_block  # 例如 7
-    module_ratios_matrix = module_ratios.reshape((num_layers, num_modules))
-    
-    # 计算每层整体剪枝率 R(l)（这里取各模块剪枝比例的均值，也可以使用其他统计方式）
-    layer_overall_ratio = np.mean(module_ratios_matrix, axis=1)  # shape (32,)
-    
-    # Step 5: 利用 ESD 归一化重新分配到每个模块
-    # 用整个 final_esd（即 result_matrix.flatten()）计算归一化参数
-    esd_min = np.min(final_esd)
-    esd_max = np.max(final_esd)
-    
-    # 重新计算各模块的重要性： I = 1 - (esd - esd_min)/(esd_max - esd_min)
-    # 并用此归一化值作为权重分配每层整体剪枝率
-    layer_component_ratios = {}
-    for layer_idx in range(num_layers):
-        # 取该层 7 个模块的 ESD 数值
-        layer_esd = module_ratios_matrix[layer_idx, :]  # 此处注意：module_ratios_matrix已是剪枝比例；而我们需要 ESD 对应的归一化值
-        # 这里应使用 result_matrix[layer_idx, :] 对应的 ESD 数值
-        layer_esd_values = result_matrix[layer_idx, :]
-        module_importance = 1 - (layer_esd_values - esd_min) / (esd_max - esd_min)
-        total_importance = np.sum(module_importance)
-        # 重新分配：每个模块最终剪枝比例 = layer_overall_ratio * (module_importance / total_importance)
-        final_module_ratios = layer_overall_ratio[layer_idx] * (module_importance / total_importance)
-        layer_component_ratios[layer_idx] = final_module_ratios.tolist()
-    
-    print("Final per-layer component (QKV,Out,Gate,Up,Down) pruning ratios:")
-    for layer_idx in sorted(layer_component_ratios.keys()):
-        print(f"Layer {layer_idx}: {layer_component_ratios[layer_idx]}")
-    
-    return layer_component_ratios
+    print("ESD metric values after block_wise processing:", metrics)
+    fisher_scores_flat = np.array([
+        3.109375, 2.5625, 39.46875, 59.4375, 31.40625, 35.09375, 62.9375,
+        6.4765625, 6.58203125, 52.84375, 51.0625, 65.3125, 76.8125, 101.6875,
+        10.734375, 9.671875, 55.25, 53.8125, 83.625, 98.375, 124.4375,
+        11.609375, 9.0703125, 25.3125, 28.25, 92.875, 100.3125, 106.4375,
+        11.921875, 9.34375, 22.75, 26.34375, 94.6875, 102.625, 100.75,
+        13.5625, 11.53125, 21.4375, 24.578125, 84.8125, 95.875, 88.625,
+        10.8359375, 9.109375, 20.375, 25.140625, 75.0625, 82.25, 75.125,
+        9.0078125, 7.94140625, 18.71875, 24.078125, 61.71875, 67.3125, 64.6875,
+        8.765625, 7.53125, 18.90625, 26.046875, 47.59375, 53.03125, 56.84375,
+        7.66796875, 6.48828125, 14.5546875, 20.125, 42.28125, 47.40625, 52.46875,
+        8.265625, 7.27734375, 17.703125, 22.25, 41.75, 46.1875, 51.3125,
+        8.96875, 7.66796875, 20.375, 25.453125, 40.65625, 44.96875, 52.15625,
+        8.28125, 6.8828125, 17.6875, 22.09375, 41.4375, 46.84375, 53.46875,
+        8.7109375, 7.34375, 18.03125, 21.125, 42.125, 46.6875, 53.65625,
+        9.0859375, 8.2734375, 21.59375, 23.734375, 44.3125, 49.34375, 54.75,
+        8.5546875, 7.35546875, 19.6875, 21.90625, 45.25, 49.59375, 56.6875,
+        9.421875, 8.375, 23.71875, 25.015625, 47.28125, 52.0, 62.125,
+        9.265625, 7.6953125, 20.125, 23.140625, 48.6875, 52.96875, 64.0,
+        7.609375, 6.54296875, 17.8125, 19.5625, 50.03125, 53.53125, 65.25,
+        7.75390625, 6.72265625, 16.671875, 18.171875, 52.125, 55.125, 67.6875,
+        9.84375, 9.0625, 21.203125, 22.890625, 53.09375, 55.6875, 68.875,
+        7.42578125, 6.45703125, 13.796875, 15.390625, 53.53125, 55.5625, 67.9375,
+        5.5625, 5.671875, 14.9609375, 15.0703125, 55.0625, 56.09375, 66.9375,
+        6.05859375, 5.75, 15.859375, 16.3125, 55.625, 55.875, 66.0625,
+        5.2734375, 5.109375, 12.28125, 12.546875, 56.46875, 57.21875, 66.1875,
+        7.734375, 7.640625, 16.71875, 16.984375, 56.875, 56.78125, 64.5,
+        5.53125, 5.56640625, 15.390625, 14.8984375, 58.28125, 57.9375, 64.4375,
+        6.88671875, 7.74609375, 17.90625, 17.359375, 60.15625, 59.53125, 65.5625,
+        8.1171875, 8.96875, 20.453125, 20.984375, 63.1875, 62.125, 70.5,
+        7.60546875, 7.23046875, 17.28125, 16.53125, 70.875, 71.5625, 80.375,
+        7.4765625, 6.92578125, 18.078125, 18.15625, 82.3125, 83.5, 124.0625,
+        16.375, 13.75, 41.71875, 33.21875, 95.9375, 103.375, 132.625
+    ])
+    num_layers = 32
+    num_modules = 7
+    fisher_scores = fisher_scores_flat.reshape(num_layers, num_modules)
+    ep = 1e-8
+    module_prune_allocations = []  # 存储每层内部各模块分配的剪枝比例
+    for i in range(num_layers):
+        # 取出该层的 7 个模块的 Fisher 分数
+        layer_fisher = fisher_scores[i]
+        # 计算倒数（注意：Fisher 分数越高，倒数越低，表示该模块更重要，不宜剪得多）
+        inv_fisher = 1.0 / (layer_fisher + ep)
+        # 归一化使得各模块权重之和为 1
+        inv_norm = inv_fisher / inv_fisher.sum()
+        # 该层整体剪枝比例（由 ESD 得到）
+        layer_prune_ratio = metrics[7*i]
+        # 将整体剪枝比例按倒数归一化的权重进行分配
+        module_prune_ratio = inv_norm * layer_prune_ratio
+        module_prune_allocations.append(module_prune_ratio)
 
-
+    module_prune_allocations = np.array(module_prune_allocations)
+    print("每层各模块的剪枝比例分配（每行依次对应 Q, K, V, O, gate, up, down）：")
+    for i, alloc in enumerate(module_prune_allocations):
+        print(f"Layer {i+1:02d}: " + ", ".join(f"{ratio:.4f}" for ratio in alloc))
 
 
 def ww_sparsity_llama3_8b(args, model, device=torch.device("cuda:0"),
