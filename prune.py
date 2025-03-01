@@ -506,7 +506,7 @@ def ww_sparsity_llama2_7b_split(args, model, device=torch.device("cuda:0"),
         blocks = model.model.decoder.layers    
     else:
         blocks = model.model.layers
-
+    
     # 得到待剪枝层字典，假设 find_layers 返回的顺序与 transformer 层顺序一致，
     # 每个 transformer 层内有7个子层
     layers = [find_layers(blocks)]
@@ -571,6 +571,7 @@ def ww_sparsity_llama2_7b_split(args, model, device=torch.device("cuda:0"),
     layerwise_pruning_ratios_esd = layerwise_pruning_ratios_esd * scaler
     layerwise_pruning_ratios_esd = layerwise_pruning_ratios_esd.cpu().numpy().tolist()
     print("ESD-based ratios:", layerwise_pruning_ratios_esd)
+    return layerwise_pruning_ratios_esd
    
 
 
