@@ -501,12 +501,11 @@ def ww_sparsity_llama2_7b_split(args, model, device=torch.device("cuda:0"),
       5. 将每层整体剪枝率按归一化的模块重要性重新分配到每个模块上，返回每层 7 个模块的剪枝比例。
     """
     
-    # Step 1: 获取 Transformer 层以及各模块参数数量
     if "opt" in args.model:
         blocks = model.model.decoder.layers    
     else:
         blocks = model.model.layers
-    
+
     # 得到待剪枝层字典，假设 find_layers 返回的顺序与 transformer 层顺序一致，
     # 每个 transformer 层内有7个子层
     layers = [find_layers(blocks)]
@@ -515,65 +514,43 @@ def ww_sparsity_llama2_7b_split(args, model, device=torch.device("cuda:0"),
         for name in layer:
             prunables.append(layer[name].weight.numel())
     layer_num_in_block = int(len(prunables) / len(blocks))
-    flat = np.array([  3164.0625,   2611.3281,  10296.8750,  28500.0000,  10171.8750,
-          9468.7500,   9640.6250,   4234.3750,   2957.0312,  33593.7500,
-         15054.6875,  13476.5625,  20984.3750,  17125.0000,   3199.2188,
-          3980.4688,  20625.0000,  34625.0000,  12312.5000,  17406.2500,
-        556000.0000,   3615.2344,   3029.2969,  35031.2500,   8453.1250,
-         17375.0000,   7214.8438,  12398.4375,   4410.1562,   4968.7500,
-         26671.8750,  11789.0625,  11687.5000,  14890.6250,  11843.7500,
-          5210.9375,   2939.4531,  25046.8750,  12632.8125,  11882.8125,
-          9617.1875,  10171.8750,   2710.9375,   3439.4531,  25046.8750,
-          4269.5312,   7433.5938,  10015.6250,   7289.0625,   6078.1250,
-         11898.4375,  15250.0000,   6726.5625,  17640.6250,  21156.2500,
-          6714.8438,   4472.6562,   5789.0625,  27421.8750,  11015.6250,
-         13531.2500,  12148.4375,  12273.4375,   4417.9688,   4273.4375,
-         18953.1250,  14781.2500,   5804.6875,  10046.8750,  13820.3125,
-          4292.9688,   9164.0625,  13812.5000,   5917.9688,   8234.3750,
-         11156.2500,   8656.2500,   6785.1562,   5582.0312,  13976.5625,
-          6386.7188,   9062.5000,   9804.6875,   7347.6562,   4207.0312,
-          7191.4062,  16046.8750,  11687.5000,  11179.6875,  11921.8750,
-          8468.7500,   6570.3125,   7625.0000,  16250.0000,   6765.6250,
-         16937.5000,  11695.3125,  12117.1875,   5425.7812,  14250.0000,
-         15945.3125,   5027.3438,  11710.9375,  10320.3125,  10140.6250,
-          5675.7812,   4105.4688,  14617.1875,   5085.9375,  11484.3750,
-          5886.7188,  15398.4375,   4773.4375,   6332.0312,  11750.0000,
-          8789.0625,   9289.0625,   8031.2500,  12101.5625,   6453.1250,
-          4492.1875,  18453.1250,   5953.1250,  14210.9375,  10359.3750,
-         12781.2500,   5890.6250,   9265.6250,  20265.6250,   6824.2188,
-         12414.0625,  14351.5625,   8710.9375,   4441.4062,   4289.0625,
-         11507.8125,   4730.4688,   8648.4375,   9710.9375,  13992.1875,
-          3585.9375,   3369.1406,   9921.8750,  10117.1875,   8398.4375,
-          8796.8750,  16859.3750,   2263.6719,   2750.0000,  11406.2500,
-          8164.0625,   5457.0312,   5703.1250,  14070.3125,   2503.9062,
-          3007.8125,   9789.0625,   6695.3125,   6964.8438,   8632.8125,
-         10726.5625,   2988.2812,   2275.3906,  13984.3750,   2664.0625,
-          5957.0312,   5546.8750,  14718.7500,   4210.9375,   2451.1719,
-         12085.9375,   5839.8438,   6988.2812,   6230.4688,   6546.8750,
-          3082.0312,   2718.7500,  13898.4375,   7570.3125,   8609.3750,
-          8656.2500,  12578.1250,   2548.8281,   3070.3125,  12007.8125,
-          7261.7188,   7132.8125,   6835.9375,   9539.0625,   5031.2500,
-          3292.9688,   8804.6875,   3957.0312,   8054.6875,  11875.0000,
-         11921.8750,   6753.9062,   5113.2812,  12359.3750,   6867.1875,
-          9148.4375,  36968.7500,  10757.8125,   6292.9688,   4062.5000,
-         13125.0000,   3548.8281,  18921.8750,  13203.1250,  11617.1875,
-          3162.1094,   3042.9688,   6781.2500,   5410.1562, 153250.0000,
-         11570.3125,  30062.5000,   4738.2812,   7015.6250,   5875.0000,
-          7191.4062,  13710.9375,   7816.4062,  16921.8750])
-    scores = torch.tensor(flat, dtype=torch.float32)
+    
+    # 加载ESD指标
+    metrics = np.load(f"{args.ww_metric_cache}/{args.ww_metric}.npy")
+    print("ESD raw metrics:", metrics)
+    if args.mapping_type == 'block_wise':
+        block_metrics = [np.mean(metrics[i:i+layer_num_in_block]) 
+                         for i in range(0, len(metrics), layer_num_in_block)]
+        metrics = [i for i in block_metrics for j in range(layer_num_in_block)]
+    print("ESD metric values after block_wise processing:", metrics)
+            
+    scores = torch.tensor(metrics, dtype=torch.float32)
     prunables_tensor = torch.tensor(prunables, dtype=torch.float32)
     max_score = torch.max(scores)
     min_score = torch.min(scores)
     # 线性映射到 [s1, s2]
-    s1 = 0.9
-    s2 = 1
     layerwise_pruning_ratios_esd = (((scores - min_score) / (max_score - min_score)) * (s2 - s1) + s1)
-  
     scaler = torch.sum(prunables_tensor) * args.sparsity_ratio / (torch.sum(prunables_tensor * layerwise_pruning_ratios_esd))
     layerwise_pruning_ratios_esd = layerwise_pruning_ratios_esd * scaler
     layerwise_pruning_ratios_esd = layerwise_pruning_ratios_esd.cpu().numpy().tolist()
     print("ESD-based ratios:", layerwise_pruning_ratios_esd)
-    return layerwise_pruning_ratios_esd
+
+    res = []
+
+    for i in range(32):
+        res.append(layerwise_pruning_ratios_esd[i] * 0.2 * 7)
+        res.append(layerwise_pruning_ratios_esd[i] * 0.2* 7)
+        res.append(layerwise_pruning_ratios_esd[i] * 0.1 * 7)
+        res.append(layerwise_pruning_ratios_esd[i] * 0.1 * 7)
+        res.append(layerwise_pruning_ratios_esd[i] * 0.1 * 7)
+        res.append(layerwise_pruning_ratios_esd[i] * 0.1 * 7)
+        res.append(layerwise_pruning_ratios_esd[i] * 0.2 * 7)
+
+    res = torch.tensor(res, dtype=torch.float32)
+
+    res =  res.cpu().numpy().tolist()
+    print(res)
+    return res
    
 
 
