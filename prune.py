@@ -539,19 +539,19 @@ def ww_sparsity_llama2_7b_split(args, model, device=torch.device("cuda:0"),
 
     for i in range(32):
         #Q
-        res.append(layerwise_pruning_ratios_esd[i*7] * 0.150583 * 7)
+        res.append(layerwise_pruning_ratios_esd[i*7] * 0.151177 * 7)
         #K
-        res.append(layerwise_pruning_ratios_esd[i*7] * 0.146423* 7)
+        res.append(layerwise_pruning_ratios_esd[i*7] * 0.146697* 7)
         #V
-        res.append(layerwise_pruning_ratios_esd[i*7] * 0.145123 * 7)
+        res.append(layerwise_pruning_ratios_esd[i*7] * 0.145297 * 7)
         #OUT
-        res.append(layerwise_pruning_ratios_esd[i*7] *  0.143043 * 7)
+        res.append(layerwise_pruning_ratios_esd[i*7] * 0.143057 * 7)
         #GATE
-        res.append(layerwise_pruning_ratios_esd[i*7] *   0.136803* 7)
+        res.append(layerwise_pruning_ratios_esd[i*7] *   0.136337* 7)
         #UP
-        res.append(layerwise_pruning_ratios_esd[i*7] *  0.137973* 7)
+        res.append(layerwise_pruning_ratios_esd[i*7] *  0.137597* 7)
         #DOWN
-        res.append(layerwise_pruning_ratios_esd[i*7] * 0.140053* 7)
+        res.append(layerwise_pruning_ratios_esd[i*7] * 0.139837* 7)
 
     res = torch.tensor(res, dtype=torch.float32)
 
