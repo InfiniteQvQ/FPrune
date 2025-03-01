@@ -11,10 +11,10 @@ differences = [v - baseline_value for v in raw_values]
 mean_diff = sum(differences) / len(differences)
 
 # 设置缩放因子 s，保证调整后权重不会相差太大，最好使最高不超过0.15
-s = 0.014
+s = 0.005
 
 # 计算每个组件的权重
-weights = [default_weight + s * (d - mean_diff) for d in differences]
+weights = [default_weight - s * (d - mean_diff) for d in differences]
 
 # 输出结果
 for comp, w in zip(components, weights):
