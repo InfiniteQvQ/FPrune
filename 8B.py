@@ -1,289 +1,215 @@
 import torch
-import numpy as np
+import torch.nn as nn
 from tqdm import tqdm
-from torch import nn
-from transformers import LlamaForCausalLM, AutoTokenizer, LlamaTokenizer, AutoModelForCausalLM
-from datasets import load_dataset
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
-# 配置参数
-class Args:
-    def __init__(self):
-        self.dataset = "wikitext2"
-        self.seqlen = 2048
-        self.batch_size = 1
-
-args = Args()
-
-# 加载原始模型和分词器
-
-cache_dir = "/root/autodl-tmp/llm_weights"
-model = AutoModelForCausalLM.from_pretrained(
-    "meta-llama/Meta-Llama-3-8B",
-    cache_dir=cache_dir,
-    device_map="auto",  # 让 Hugging Face 自动分配多个 GPU
-    torch_dtype=torch.float16
-)
-
-tokenizer_name = "HuggingFaceM4/llama-7b-tokenizer"
-tokenizer = LlamaTokenizer.from_pretrained(tokenizer_name)
-
-
-
-# 剪枝函数定义 --------------------------------------------------------------
-def prune_linear_layer(layer, mask, dim):
-    """结构化剪枝线性层"""
-    if mask is None:
-        return layer
+class WrappedGPT:
+    """收集激活统计量"""
+    def __init__(self, layer):
+        self.layer = layer
+        self.activations = None
+        self.scaler_row = None
     
-    indices = mask.nonzero().squeeze()
-    w = layer.weight.index_select(dim, indices)
-    if layer.bias is not None and dim == 1:
-        b = layer.bias
-    else:
-        b = None
-    
-    pruned_layer = nn.Linear(w.size(1), w.size(0), bias=layer.bias is not None)
-    pruned_layer.weight.data.copy_(w)
-    if b is not None:
-        pruned_layer.bias.data.copy_(b)
-    return pruned_layer
+    def add_batch(self, inp, out):
+        # 计算输入特征的L2范数
+        inp = inp.detach()
+        if self.scaler_row is None:
+            self.scaler_row = torch.zeros(inp.shape[-1], device=inp.device)
+        self.scaler_row += inp.pow(2).sum(dim=0)
 
-def compute_layer_importance(layer):
-    """计算层重要性（适配GQA结构并分离梯度）"""
-    scores = {}
-    
-    # 禁用梯度计算以节省内存
-    with torch.no_grad():
-        # 获取注意力头参数
-        num_heads = layer.self_attn.num_heads
-        num_key_value_heads = layer.self_attn.num_key_value_heads
-        head_dim = layer.self_attn.head_dim
-
-        # 计算查询头重要性（Q）
-        q_proj = layer.self_attn.q_proj.weight.detach()
-        q_heads = q_proj.view(-1, num_heads, head_dim)
-        q_importance = torch.norm(q_heads, p=2, dim=(0,2))  # [num_heads]
+class GQAWandaPruner:
+    def __init__(self, model, tokenizer, device="cuda"):
+        self.model = model
+        self.tokenizer = tokenizer
+        self.device = device
+        self.config = model.config
         
-        # 计算键值头重要性（K/V）
-        k_proj = layer.self_attn.k_proj.weight.detach()
-        k_heads = k_proj.view(-1, num_key_value_heads, head_dim)
-        k_importance = torch.norm(k_heads, p=2, dim=(0,2))  # [num_kv_heads]
-        
-        v_proj = layer.self_attn.v_proj.weight.detach()
-        v_heads = v_proj.view(-1, num_key_value_heads, head_dim)
-        v_importance = torch.norm(v_heads, p=2, dim=(0,2))  # [num_kv_heads]
-        
-        # 扩展键值头重要性以匹配查询头
-        group_size = num_heads // num_key_value_heads
-        expanded_k = k_importance.repeat_interleave(group_size)
-        expanded_v = v_importance.repeat_interleave(group_size)
-        
-        # 合并重要性（Q:50%, K:30%, V:20%）
-        head_importance = q_importance*0.5 + expanded_k*0.3 + expanded_v*0.2
+        # 获取GQA配置
+        self.num_attention_heads = self.config.num_attention_heads
+        self.num_key_value_heads = getattr(self.config, "num_key_value_heads", self.num_attention_heads)
+        self.head_dim = self.config.hidden_size // self.num_attention_heads
+        self.groups_per_layer = self.num_attention_heads // self.num_key_value_heads
 
-        # MLP门控结构重要性（保持原逻辑）
-        gate = layer.mlp.gate_proj.weight.detach()
-        up = layer.mlp.up_proj.weight.detach()
-        down = layer.mlp.down_proj.weight.detach()
-        gate_importance = torch.norm(gate, p=1, dim=0)
-        updown_importance = (torch.norm(up, p=1, dim=0) + torch.norm(down, p=1, dim=1))/2
-    
-    return {
-        'attention_heads': head_importance.cpu().numpy(),
-        'gate_channels': gate_importance.cpu().numpy(),
-        'updown_channels': updown_importance.cpu().numpy()
-    }
+    def prepare_calibration_input(self, nsamples=128, seqlen=4096):
+        """准备校准输入（LLaMA3专用）"""
+        dummy_input = torch.randint(0, self.tokenizer.vocab_size, (nsamples, seqlen)).to(self.device)
+        layers = self.model.model.layers
+        dtype = next(self.model.parameters()).dtype
+        
+        # 初始化缓存
+        inps = torch.zeros((nsamples, seqlen, self.config.hidden_size), dtype=dtype, device=self.device)
+        cache = {'i': 0}
 
-def prune_linear_layer(layer, mask, dim):
-    """结构化剪枝线性层（增加安全检查）"""
-    if mask is None or mask.sum() == 0:
-        return layer
-    
-    device = layer.weight.device
-    indices = mask.nonzero().squeeze().to(device)
-    
-    # 防止零维度张量
-    if indices.numel() == 0:
-        return layer
-    
-    # 检查索引有效性
-    max_idx = layer.weight.shape[dim] - 1
-    if (indices > max_idx).any():
-        invalid_indices = indices[indices > max_idx]
-        indices = indices[indices <= max_idx]
-        print(f"警告：发现无效索引{invalid_indices}，已自动过滤")
-    
-    w = layer.weight.index_select(dim, indices)
-    
-    # 确保至少保留一个神经元
-    if w.shape[0] == 0 or w.shape[1] == 0:
-        raise ValueError(f"尝试创建零维度层：原始维度{layer.weight.shape}，剪枝后{w.shape}")
-    
-    pruned_layer = nn.Linear(w.size(1), w.size(0), bias=layer.bias is not None).to(device)
-    pruned_layer.weight.data.copy_(w)
-    if layer.bias is not None and dim == 1:
-        pruned_layer.bias.data.copy_(layer.bias)
-    return pruned_layer
+        class Catcher(nn.Module):
+            def __init__(self, module):
+                super().__init__()
+                self.module = module
+            def forward(self, inp, **kwargs):
+                inps[cache['i']] = inp
+                cache['i'] += 1
+                cache['attention_mask'] = kwargs.get('attention_mask')
+                cache['position_ids'] = kwargs.get('position_ids')
+                raise ValueError
 
-def prune_model(model, target_sparsity=0.7):
-    """执行全局剪枝（修复prune_masks未定义问题）"""
-    device = next(model.parameters()).device
-    model.eval()
-    
-    # 步骤1：计算各层重要性
-    layer_scores = {}
-    for layer_id, layer in enumerate(model.model.layers):
-        layer_scores[layer_id] = compute_layer_importance(layer)
-    
-    # 步骤2：生成全局剪枝掩码（新增这部分）
-    global_scores = []
-    for layer_id in layer_scores:
-        scores = layer_scores[layer_id]
-        global_scores.extend([('head', layer_id, i, s) for i, s in enumerate(scores['attention_heads'])])
-        global_scores.extend([('gate', layer_id, i, s) for i, s in enumerate(scores['gate_channels'])])
-        global_scores.extend([('updown', layer_id, i, s) for i, s in enumerate(scores['updown_channels'])])
-    
-    sorted_scores = sorted(global_scores, key=lambda x: x[3])
-    cutoff_idx = int(len(sorted_scores) * target_sparsity)
-    prune_masks = {layer_id: {'heads': [], 'gate': [], 'updown': []} for layer_id in range(len(model.model.layers))}
-    
-    for item in sorted_scores[:cutoff_idx]:
-        type_, layer_id, idx, _ = item
-        if type_ == 'head':
-            prune_masks[layer_id]['heads'].append(idx)
-        elif type_ == 'gate':
-            prune_masks[layer_id]['gate'].append(idx)
-        elif type_ == 'updown':
-            prune_masks[layer_id]['updown'].append(idx)
-    
-    # 步骤3：应用剪枝
-    for layer_id, layer in enumerate(model.model.layers):
-        masks = prune_masks[layer_id]
+        # 捕获输入
+        layers[0] = Catcher(layers[0])
+        try:
+            self.model(dummy_input)
+        except ValueError:
+            pass
+        layers[0] = layers[0].module  # 恢复原始层
         
-        # 转换并过滤非法索引
-        def filter_indices(indices, max_val):
-            return [idx for idx in indices if idx < max_val]
-        
-        # 注意力头索引校验
-        max_heads = layer.self_attn.num_heads
-        masks['heads'] = filter_indices(masks['heads'], max_heads)
-        
-        # Gate投影校验
-        max_gate = layer.mlp.gate_proj.out_features
-        masks['gate'] = filter_indices(masks['gate'], max_gate)
-        
-        # Up/Down投影校验
-        max_updown = layer.mlp.up_proj.out_features
-        masks['updown'] = filter_indices(masks['updown'], max_updown)
-        
-        # 转换为张量
-        masks['heads'] = torch.tensor(masks['heads'], device=device)
-        masks['gate'] = torch.tensor(masks['gate'], device=device)
-        masks['updown'] = torch.tensor(masks['updown'], device=device)
-        
-        # 剪枝注意力头
-        head_mask = ~torch.isin(
-            torch.arange(layer.self_attn.num_heads, device=device),
-            masks['heads']
-        )
-        
-        if len(masks['heads']) > 0:
-            layer.self_attn.num_heads -= len(masks['heads'])
-            layer.self_attn.q_proj = prune_linear_layer(layer.self_attn.q_proj, head_mask, 0)
-            layer.self_attn.k_proj = prune_linear_layer(layer.self_attn.k_proj, head_mask, 0)
-            layer.self_attn.v_proj = prune_linear_layer(layer.self_attn.v_proj, head_mask, 0)
-            layer.self_attn.o_proj = prune_linear_layer(layer.self_attn.o_proj, head_mask, 1)
-        
-        # 剪枝MLP层
-        gate_mask = ~torch.isin(
-            torch.arange(layer.mlp.gate_proj.out_features, device=device),
-            masks['gate']
-        )
-        updown_mask = ~torch.isin(
-            torch.arange(layer.mlp.up_proj.out_features, device=device),
-            masks['updown']
-        )
-        
-        layer.mlp.gate_proj = prune_linear_layer(layer.mlp.gate_proj, gate_mask, 1)
-        layer.mlp.up_proj = prune_linear_layer(layer.mlp.up_proj, updown_mask, 1)
-        layer.mlp.down_proj = prune_linear_layer(layer.mlp.down_proj, updown_mask, 0)
-    
-    return model
+        return inps, cache
 
-# 评估函数 ----------------------------------------------------------------
-def get_loaders(dataset, tokenizer, seqlen=2048):
-    """获取数据加载器"""
-    if dataset == "wikitext2":
-        testdata = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
-        testenc = tokenizer("\n\n".join(testdata["text"]), return_tensors="pt")
-    else:
-        raise ValueError("Unsupported dataset")
-    
-    # 分割样本
-    nsamples = testenc.input_ids.numel() // seqlen
-    testenc = testenc.input_ids[:, :(nsamples*seqlen)]
-    testenc = testenc.reshape(nsamples, seqlen)
-    
-    class DataLoader:
-        def __init__(self, data, batch_size=1):
-            self.data = data
-            self.batch_size = batch_size
-            self.num_batches = len(data) // batch_size
-        
-        def __iter__(self):
-            for i in range(0, len(self.data), self.batch_size):
-                yield self.data[i:i+self.batch_size]
-    
-    return None, DataLoader(testenc)
+    def prune(self, sparsity_ratio=0.5, per_group_ratios=None, nsamples=128):
+        """执行GQA剪枝"""
+        self.model.eval()
+        original_use_cache = self.config.use_cache 
+        self.config.use_cache = False
 
-def eval_ppl_wikitext(model, testenc, bs=1, device="cuda"):
-    """评估wikitext困惑度"""
-    testenc = testenc.input_ids
-    nsamples = testenc.numel() // model.config.max_position_embeddings
-    nlls = []
-    
-    progress_bar = tqdm(range(0, nsamples, bs), desc="Evaluating")
-    for i in progress_bar:
-        j = min(i+bs, nsamples)
-        inputs = testenc[:, i*model.config.max_position_embeddings:j*model.config.max_position_embeddings]
-        inputs = inputs.reshape(j-i, model.config.max_position_embeddings).to(device)
-        
-        with torch.no_grad():
-            lm_logits = model(inputs).logits
-        
-        shift_logits = lm_logits[:, :-1, :].contiguous()
-        shift_labels = inputs[:, 1:]
-        loss_fct = nn.CrossEntropyLoss()
-        loss = loss_fct(shift_logits.reshape(-1, shift_logits.size(-1)), 
-                        shift_labels.reshape(-1))
-        nlls.append(loss.float() * model.config.max_position_embeddings * (j-i))
-    
-    ppl = torch.exp(torch.stack(nlls).sum() / (nsamples * model.config.max_position_embeddings))
-    return ppl.item()
+        # 准备校准数据
+        print("Preparing calibration inputs...")
+        inps, cache = self.prepare_calibration_input(nsamples)
+        attention_mask = cache['attention_mask']
+        position_ids = cache['position_ids']
+        outs = torch.zeros_like(inps)
 
-def eval_ppl(model, tokenizer):
-    """完整评估流程"""
-    _, test_loader = get_loaders(args.dataset, tokenizer, args.seqlen)
-    model.eval()
-    ppl = eval_ppl_wikitext(model, test_loader, args.batch_size)
-    return ppl
+        # 逐层处理
+        layers = self.model.model.layers
+        for layer_idx in tqdm(range(len(layers)), desc="Pruning layers"):
+            layer = layers[layer_idx]
+            subset = find_layers(layer)
 
-# 执行流程 ----------------------------------------------------------------
+            # GQA剪枝核心
+            if "self_attn" in subset:
+                attn_layer = subset["self_attn"]
+                q_proj = attn_layer.q_proj
+                k_proj = attn_layer.k_proj
+                v_proj = attn_layer.v_proj
+
+                # 收集激活统计量
+                wrapped_q = WrappedGPT(q_proj)
+                wrapped_k = WrappedGPT(k_proj)
+                wrapped_v = WrappedGPT(v_proj)
+                
+                handles = [
+                    q_proj.register_forward_hook(lambda m, inp, out: wrapped_q.add_batch(inp[0], out)),
+                    k_proj.register_forward_hook(lambda m, inp, out: wrapped_k.add_batch(inp[0], out)),
+                    v_proj.register_forward_hook(lambda m, inp, out: wrapped_v.add_batch(inp[0], out))
+                ]
+
+                # 前向传播收集数据
+                for j in range(nsamples):
+                    with torch.no_grad():
+                        layer(inps[j].unsqueeze(0), 
+                             attention_mask=attention_mask,
+                             position_ids=position_ids)
+                
+                # 移除hook
+                for h in handles:
+                    h.remove()
+
+                # 计算组重要性（Wanda指标）
+                group_imp = []
+                for group_id in range(self.num_key_value_heads):
+                    # 计算参数范围
+                    q_start = group_id * self.groups_per_layer * self.head_dim
+                    q_end = (group_id+1) * self.groups_per_layer * self.head_dim
+                    kv_start = group_id * self.head_dim
+                    kv_end = (group_id+1) * self.head_dim
+                    
+                    # Wanda重要性：|W| * sqrt(激活统计量)
+                    q_imp = (torch.abs(q_proj.weight[q_start:q_end]) * 
+                            torch.sqrt(wrapped_q.scaler_row)).sum()
+                    k_imp = (torch.abs(k_proj.weight[kv_start:kv_end]) * 
+                            torch.sqrt(wrapped_k.scaler_row)).sum()
+                    v_imp = (torch.abs(v_proj.weight[kv_start:kv_end]) * 
+                            torch.sqrt(wrapped_v.scaler_row)).sum()
+                    
+                    # 使用自定义比例或默认比例
+                    if per_group_ratios is not None:
+                        ratio = per_group_ratios[layer_idx][group_id]
+                    else:
+                        ratio = 1.0  # 默认全比例参与排序
+                        
+                    group_imp.append(ratio * (0.5*q_imp + 0.3*k_imp + 0.2*v_imp))
+
+                # 选择要剪枝的组
+                total_groups = len(group_imp)
+                prune_num = int(total_groups * sparsity_ratio)
+                _, prune_indices = torch.topk(-torch.tensor(group_imp), prune_num)
+
+                # 生成剪枝掩码
+                def create_mask(dim, indices, is_query=False):
+                    mask = torch.ones(dim, dtype=torch.bool, device=self.device)
+                    for idx in indices:
+                        block = self.groups_per_layer*self.head_dim if is_query else self.head_dim
+                        start = idx * block
+                        end = start + block
+                        mask[start:end] = False
+                    return mask
+
+                # 应用剪枝
+                q_mask = create_mask(q_proj.out_features, prune_indices, is_query=True)
+                kv_mask = create_mask(k_proj.out_features, prune_indices)
+                
+                q_proj.weight.data[q_mask] = 0
+                k_proj.weight.data[kv_mask] = 0
+                v_proj.weight.data[kv_mask] = 0
+
+            # 更新中间表示
+            with torch.no_grad():
+                for j in range(nsamples):
+                    outs[j] = layer(inps[j].unsqueeze(0),
+                                  attention_mask=attention_mask,
+                                  position_ids=position_ids)[0]
+                inps, outs = outs, inps
+
+        # 恢复配置
+        self.config.use_cache = original_use_cache
+        torch.cuda.empty_cache()
+        return self.model
+
+def find_layers(module, layers=[nn.Linear], name=''):
+    """递归查找指定类型的层"""
+    if type(module) in layers:
+        return {name: module}
+    res = {}
+    for name1, child in module.named_children():
+        res.update(find_layers(
+            child, layers=layers, 
+            name=name + '.' + name1 if name != '' else name1
+        ))
+    return res
+
+# 使用示例 ---------------------------------------------------
 if __name__ == "__main__":
-    # Step 1: 剪枝模型
-    print("开始剪枝...")
-    pruned_model = prune_model(model, target_sparsity=0.7)
+    # 加载模型
+    cache_dir = "/root/autodl-tmp/llm_weights"
+    model = AutoModelForCausalLM.from_pretrained(
+        "meta-llama/Meta-Llama-3-8B",
+        cache_dir=cache_dir,
+        device_map="auto",
+        torch_dtype=torch.float16
+    )
+    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B")
     
-    # Step 2: 评估原始模型
-    print("\n评估原始模型:")
-    original_ppl = eval_ppl(model, tokenizer)
-    print(f"原始模型困惑度: {original_ppl:.2f}")
+    # 初始化剪枝器
+    pruner = GQAWandaPruner(model, tokenizer)
     
-    # Step 3: 评估剪枝后模型
-    print("\n评估剪枝后模型:")
-    pruned_ppl = eval_ppl(pruned_model, tokenizer)
-    print(f"剪枝后困惑度: {pruned_ppl:.2f}")
+    # 自定义每个组的剪枝比例（示例：32层 x 8组）
+    per_group_ratios = [
+        [0.8 if i < 4 else 0.2 for _ in range(8)]  # 前4组剪枝率高
+        for i in range(32)
+    ]
     
-    # Step 4: 保存结果
-    print(f"\n最终结果:\n原始PPL: {original_ppl:.2f}\n剪枝后PPL: {pruned_ppl:.2f}")
-    pruned_model.save_pretrained("llama3_8b_pruned_70percent")
+    # 执行剪枝（50%全局稀疏度）
+    pruned_model = pruner.prune(
+        sparsity_ratio=0.7,
+        per_group_ratios=per_group_ratios,
+        nsamples=128
+    )
+    
+    # 保存模型
+    pruned_model.save_pretrained("./pruned-llama3-8b")
+    tokenizer.save_pretrained("./pruned-llama3-8b")
