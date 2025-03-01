@@ -21,3 +21,27 @@ for comp, w in zip(components, weights):
     print(f"{comp}: {w:.6f}")
 
 print("Sum:", sum(weights))
+
+default_weight = 0.1428571428571429
+baseline_value =  637.44
+# 原始数值
+raw_values = [614.8, 612.25, 584.624,  599.94, 680.39,  652,  655.626]
+components = ["Q", "K", "V", "Output", "Gate", "Up", "Down"]
+
+# 计算每个组件与基准值的差异
+differences = [v - baseline_value for v in raw_values]
+
+# 计算平均差异
+mean_diff = sum(differences) / len(differences)
+
+# 设置缩放因子 s，保证调整后权重不会相差太大，最好使最高不超过0.15
+s = 0.0002
+
+# 计算每个组件的权重
+weights = [default_weight - s * (d - mean_diff) for d in differences]
+
+# 输出结果
+for comp, w in zip(components, weights):
+    print(f"{comp}: {w:.6f}")
+
+print("Sum 8B:", sum(weights))
