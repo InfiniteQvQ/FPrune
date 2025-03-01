@@ -565,6 +565,8 @@ def ww_sparsity_llama2_7b_split(args, model, device=torch.device("cuda:0"),
     max_score = torch.max(scores)
     min_score = torch.min(scores)
     # 线性映射到 [s1, s2]
+    s1 = 0.9
+    s2 = 1
     layerwise_pruning_ratios_esd = (((scores - min_score) / (max_score - min_score)) * (s2 - s1) + s1)
   
     scaler = torch.sum(prunables_tensor) * args.sparsity_ratio / (torch.sum(prunables_tensor * layerwise_pruning_ratios_esd))
