@@ -791,9 +791,9 @@ def ww_sparsity_llama3_8b_split(args, model, device=torch.device("cuda:0"),
 
     for i in range(32):
         #Q
-        res.append(combined_ratios[i*7] * 0.148 * 7)
-        #K
         res.append(combined_ratios[i*7] * 0.142 * 7)
+        #K
+        res.append(combined_ratios[i*7] * 0.148 * 7)
         #V
         res.append(combined_ratios[i*7] * 0.142 * 7)
         #OUT
