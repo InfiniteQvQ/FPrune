@@ -995,115 +995,189 @@ def prune_magnitude(args, model, tokenizer, device=torch.device("cuda:0"), prune
 
             W[W_mask] = 0
 
-
 def prune_gqa_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, prune_m=0, ratios=None):
     use_cache = model.config.use_cache 
-    model.config.use_cache = False
+    model.config.use_cache = False  # 禁用缓存以获取中间激活
 
-    # 获取GQA配置参数
-    num_attention_heads = model.config.num_attention_heads
-    num_key_value_heads = getattr(model.config, "num_key_value_heads", num_attention_heads)
-    head_dim = model.config.hidden_size // num_attention_heads
-    groups_per_layer = num_attention_heads // num_key_value_heads  # 每组的查询头数
-
+    # 准备校准数据
     print("Loading calibration data...")
-    dataloader, _ = get_loaders("c4", nsamples=args.nsamples, seed=args.seed,
-                               seqlen=model.seqlen, tokenizer=tokenizer)
+    dataloader, _ = get_loaders(
+        "c4", 
+        nsamples=args.nsamples,
+        seed=args.seed,
+        seqlen=model.seqlen,
+        tokenizer=tokenizer
+    )
     
+    # 获取输入样本
     with torch.no_grad():
         if "OPT" in model.__class__.__name__:
-            inps, outs, attention_mask, position_ids = prepare_calibration_input_opt(model, dataloader, device)
+            inps, outs, attention_mask, _ = prepare_calibration_input_opt(model, dataloader, device)
         else:
             inps, outs, attention_mask, position_ids = prepare_calibration_input(model, dataloader, device)
 
-    layers = model.model.layers if hasattr(model.model, 'layers') else model.model.decoder.layers
-    layer_num = len(layers)
-    ratios = ratios or [args.sparsity_ratio] * layer_num
+    # 获取模型层结构
+    if "OPT" in model.__class__.__name__:
+        layers = model.model.decoder.layers
+    else:    
+        layers = model.model.layers
 
-    for layer_idx in range(layer_num):
+    # 处理剪枝比例参数
+    module_order = ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'gate_proj', 'up_proj', 'down_proj']
+    if ratios is not None:
+        # 验证比例参数维度
+        expected_length = len(layers) * len(module_order)
+        assert len(ratios) == expected_length, (
+            f"Ratios length mismatch. Expected {expected_length}, got {len(ratios)}"
+        )
+        # 重塑为层×模块的矩阵
+        ratios = np.array(ratios).reshape(len(layers), len(module_order))
+    else:
+        # 生成默认比例矩阵
+        base_ratio = args.sparsity_ratio
+        ratios = np.array([
+            [
+                base_ratio*0.8,   # q_proj
+                base_ratio*1.2,   # k_proj
+                base_ratio*1.2,    # v_proj
+                base_ratio,       # o_proj
+                base_ratio*1.5,    # gate_proj
+                base_ratio*1.3,    # up_proj
+                base_ratio        # down_proj
+            ] for _ in range(len(layers))
+        ])
+
+    # 逐层处理
+    for layer_idx in range(len(layers)):
         layer = layers[layer_idx]
         subset = find_layers(layer)
-
-        # 设备映射处理
-        if f"model.layers.{layer_idx}" in model.hf_device_map:
-            dev = model.hf_device_map[f"model.layers.{layer_idx}"]
-            inps, outs = inps.to(dev), outs.to(dev)
-            attention_mask, position_ids = attention_mask.to(dev), position_ids.to(dev)
-
-        # GQA组剪枝逻辑
-        if "self_attn" in subset:
-            attn_layer = subset["self_attn"]
-            print(f"Pruning GQA layer {layer_idx}...")
-            
-            # 获取Q/K/V投影矩阵
-            q_proj = attn_layer.q_proj
-            k_proj = attn_layer.k_proj
-            v_proj = attn_layer.v_proj
-
-            # 计算组重要性分数
-            group_importance = []
-            for group_id in range(num_key_value_heads):
-                # 计算每个组对应的参数范围
-                k_start = group_id * head_dim
-                k_end = (group_id+1) * head_dim
-                q_start = group_id * groups_per_layer * head_dim
-                q_end = (group_id+1) * groups_per_layer * head_dim
-
-                # 计算组重要性（使用L2范数）
-                q_imp = torch.norm(q_proj.weight[q_start:q_end], p=2)
-                k_imp = torch.norm(k_proj.weight[k_start:k_end], p=2)
-                v_imp = torch.norm(v_proj.weight[k_start:k_end], p=2)
-                group_importance.append(0.4*q_imp + 0.3*k_imp + 0.3*v_imp)
-
-            # 选择要剪枝的组
-            group_importance = torch.tensor(group_importance)
-            prune_num = int(num_key_value_heads * ratios[layer_idx])
-            _, prune_indices = torch.topk(-group_importance, prune_num)
-
-            # 生成组剪枝掩码
-            def create_gqa_mask(weight, indices, is_query=False):
-                mask = torch.ones_like(weight, dtype=torch.bool)
-                for idx in indices:
-                    if is_query:
-                        start = idx * groups_per_layer * head_dim
-                        end = (idx+1) * groups_per_layer * head_dim
-                    else:
-                        start = idx * head_dim
-                        end = (idx+1) * head_dim
-                    mask[start:end] = 0
-                return mask
-
-            # 应用组剪枝
-            q_mask = create_gqa_mask(q_proj.weight, prune_indices, is_query=True)
-            k_mask = create_gqa_mask(k_proj.weight, prune_indices)
-            v_mask = create_gqa_mask(v_proj.weight, prune_indices)
-
-            q_proj.weight.data[q_mask] = 0
-            k_proj.weight.data[k_mask] = 0
-            v_proj.weight.data[v_mask] = 0
-
-        # 处理其他线性层（保持原有逻辑）
+        
+        # 初始化包装层
         wrapped_layers = {}
         for name in subset:
-            if name != "self_attn":
-                wrapped_layers[name] = WrappedGPT(subset[name])
+            wrapped_layers[name] = WrappedGPT(subset[name])
 
-        # ...（原有Wanda处理逻辑）
+        # 注册前向钩子收集激活
+        handles = []
+        def add_batch(name):
+            def tmp(_, inp, out):
+                wrapped_layers[name].add_batch(inp[0].data, out.data)
+            return tmp
+        
+        for name in subset:
+            handles.append(subset[name].register_forward_hook(add_batch(name)))
 
-        # 校准输出
+        # 前向传播收集激活
         for j in range(args.nsamples):
             with torch.no_grad():
-                outs[j] = layer(
-                    inps[j].unsqueeze(0), 
-                    attention_mask=attention_mask,
-                    position_ids=position_ids
-                )[0]
+                if "OPT" in model.__class__.__name__:
+                    outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask)[0]
+                else:
+                    outs[j] = layer(
+                        inps[j].unsqueeze(0),
+                        attention_mask=attention_mask,
+                        position_ids=position_ids
+                    )[0]
+        
+        # 移除钩子
+        for h in handles:
+            h.remove()
+
+        # GQA配置
+        num_heads = model.config.num_attention_heads
+        num_kv_groups = getattr(model.config, "num_key_value_groups", 1)
+        heads_per_group = num_heads // num_kv_groups
+
+        # 按模块顺序处理
+        for mod_idx, module_type in enumerate(module_order):
+            name = f"model.layers.{layer_idx}.self_attn.{module_type}"
+            if name not in subset:
+                continue
+
+            current_ratio = ratios[layer_idx, mod_idx]
+            W = subset[name].weight.data
+            W_metric = torch.abs(W) * torch.sqrt(wrapped_layers[name].scaler_row.reshape((1, -1)))
+
+            # GQA特殊处理
+            if module_type in ['k_proj', 'v_proj']:
+                # 验证GQA参数
+                assert num_heads % num_kv_groups == 0, (
+                    f"Invalid GQA config: {num_heads} heads / {num_kv_groups} groups"
+                )
+                
+                # 计算分组维度
+                head_dim = W.shape[0] // num_heads
+                group_dim = head_dim * heads_per_group
+                total_groups = num_kv_groups
+
+                # 分组处理
+                group_masks = []
+                for g in range(total_groups):
+                    start = g * group_dim
+                    end = (g + 1) * group_dim
+                    if g == total_groups - 1:  # 处理剩余维度
+                        end = W.shape[0]
+                    
+                    # 计算分组重要性
+                    group_metric = W_metric[start:end].mean(dim=0)
+                    sorted_vals, sorted_idx = torch.sort(group_metric)
+                    cutoff = int(sorted_vals.shape[0] * current_ratio)
+                    
+                    # 生成分组掩码
+                    group_mask = torch.zeros_like(group_metric, dtype=torch.bool)
+                    group_mask[sorted_idx[:cutoff]] = True
+                    group_masks.append(group_mask)
+
+                # 构建完整掩码
+                full_mask = torch.zeros_like(W_metric, dtype=torch.bool)
+                for g in range(total_groups):
+                    start = g * group_dim
+                    end = (g + 1) * group_dim if g != total_groups-1 else W.shape[0]
+                    full_mask[start:end] = group_masks[g].unsqueeze(0).expand(end-start, -1)
+
+                # 应用剪枝
+                W[full_mask] = 0
+
+                # 同步关联投影
+                if module_type == 'k_proj':
+                    v_name = name.replace('k_proj', 'v_proj')
+                    if v_name in subset:
+                        subset[v_name].weight.data[full_mask] = 0
+                elif module_type == 'v_proj':
+                    k_name = name.replace('v_proj', 'k_proj')
+                    if k_name in subset:
+                        subset[k_name].weight.data[full_mask] = 0
+
+            else:  # 非GQA模块
+                sorted_vals, sorted_idx = torch.sort(W_metric, dim=1)
+                cutoff = int(W_metric.shape[1] * current_ratio)
+                
+                # 生成剪枝掩码
+                prune_mask = torch.zeros_like(W_metric, dtype=torch.bool)
+                prune_mask.scatter_(1, sorted_idx[:, :cutoff], True)
+                
+                # 应用剪枝
+                W[prune_mask] = 0
+
+        # 更新中间结果
+        for j in range(args.nsamples):
+            with torch.no_grad():
+                if "OPT" in model.__class__.__name__:
+                    outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask)[0]
+                else:
+                    outs[j] = layer(
+                        inps[j].unsqueeze(0),
+                        attention_mask=attention_mask,
+                        position_ids=position_ids
+                    )[0]
         inps, outs = outs, inps
 
+    # 恢复模型配置
     model.config.use_cache = use_cache
     torch.cuda.empty_cache()
-    return model
 
+    # 验证最终稀疏度
+    print("Final sparsity:", check_sparsity(model))
 
 
 def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, prune_m=0, ratios=None):
