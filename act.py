@@ -1,10 +1,12 @@
 import torch
-import torch.nn as nn
-from transformers import AutoModelForCausalLM, AutoTokenizer, LlamaTokenizer
-import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
+from torch import nn
+from datasets import load_dataset
+from transformers import LlamaForCausalLM, LlamaTokenizer,  AutoModelForCausalLM
+# 如果是Llama2, 可以用 LlamaForCausalLM.from_pretrained("meta-llama/Llama-2-7b-hf", ...)，
+# 如果是老版7B, 可以用 decapoda 的 "decapoda-research/llama-7b-hf" (需要自己转换).
+# 这里只是个示例, 你需要改成你自己的模型名称或本地路径
 
+# ---- 1. 加载模型与tokenizer ----
 cache_dir = "/root/autodl-tmp/llm_weights"
 model = AutoModelForCausalLM.from_pretrained(
     "pinkmanlove/llama-7b-hf",
@@ -16,68 +18,163 @@ model = AutoModelForCausalLM.from_pretrained(
 tokenizer_name = "HuggingFaceM4/llama-7b-tokenizer"
 tokenizer = LlamaTokenizer.from_pretrained(tokenizer_name)
 
-# Function to extract activations per transformer block
-# Function to extract activations per transformer block
-def get_activations(model, inputs):
-    activations = {layer: {"Q": [], "K": [], "V": [], "OUT": [], "GATE": [], "UP": [], "DOWN": []} for layer in range(32)}
-    
-    def hook_fn(module, input, output, key, layer_id):
-        activations[layer_id][key].append(output.detach().cpu().numpy())
-    
-    for name, module in model.named_modules():
-        for layer_id in range(32):
-            if f"model.layers.{layer_id}.self_attn.q_proj" in name:
-                module.register_forward_hook(lambda mod, inp, out, l=layer_id: hook_fn(mod, inp, out, "Q", l))
-            elif f"model.layers.{layer_id}.self_attn.k_proj" in name:
-                module.register_forward_hook(lambda mod, inp, out, l=layer_id: hook_fn(mod, inp, out, "K", l))
-            elif f"model.layers.{layer_id}.self_attn.v_proj" in name:
-                module.register_forward_hook(lambda mod, inp, out, l=layer_id: hook_fn(mod, inp, out, "V", l))
-            elif f"model.layers.{layer_id}.self_attn.o_proj" in name:
-                module.register_forward_hook(lambda mod, inp, out, l=layer_id: hook_fn(mod, inp, out, "OUT", l))
-            elif f"model.layers.{layer_id}.mlp.gate_proj" in name:
-                module.register_forward_hook(lambda mod, inp, out, l=layer_id: hook_fn(mod, inp, out, "GATE", l))
-            elif f"model.layers.{layer_id}.mlp.up_proj" in name:
-                module.register_forward_hook(lambda mod, inp, out, l=layer_id: hook_fn(mod, inp, out, "UP", l))
-            elif f"model.layers.{layer_id}.mlp.down_proj" in name:
-                module.register_forward_hook(lambda mod, inp, out, l=layer_id: hook_fn(mod, inp, out, "DOWN", l))
-    
-    with torch.no_grad():
-        model(**inputs)
-    
-    return activations
+# device_map="auto" 让transformers自动将部分layer放在GPU/CPU, 具体硬件需求较大,仅示例
 
-# Generate synthetic input
-def generate_synthetic_input(tokenizer, max_length=128):
-    text = "This is a test input for LLaMA model analysis. " * 5
-    inputs = tokenizer(text, return_tensors="pt", max_length=max_length, truncation=True)
-    return inputs
+model.eval()
 
-# Run inference and get activations
-inputs = generate_synthetic_input(tokenizer)
-activations = get_activations(model, inputs)
+# ---- 2. 准备一小份评测数据 (wikitext-2) ----
+#    我们只取前1-2个batch来做演示
+dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")  
+# wikitext-2 test集有2k多行
 
-# Compute variance for each transformer block
-def compute_variance(activations):
-    variance_results = {layer: {} for layer in range(32)}
-    for layer in range(32):
-        for key in activations[layer]:
-            if activations[layer][key]:
-                stacked_activations = np.concatenate(activations[layer][key], axis=0)
-                stacked_activations = np.nan_to_num(stacked_activations, nan=0.0, posinf=1e10, neginf=-1e10)
-                variance_results[layer][key] = np.var(stacked_activations)
-    return variance_results
+# 取前面几条做示例
+few_samples = dataset.select(range(4))  # 只取4条, 演示足矣(越多越耗时)
+text_list = few_samples["text"]
+# 拼成一个批量
+# 这里是极简做法:把若干行拼起来, 做一个batch, 并假设不超过最大长度
+# 实际你可能得写collate_fn/自动分割等
 
-variance_results = compute_variance(activations)
+joined_text = "\n".join(text_list)
+inputs = tokenizer(joined_text, return_tensors="pt", truncation=True, max_length=512)
+# targets与inputs shift一位 (自回归LM任务) - huggingface内部会自动做, 也可自己实现
 
-# Convert to structured data for visualization
-data = []
-for layer, values in variance_results.items():
-    for key, var in values.items():
-        data.append([layer, key, var])
+input_ids = inputs["input_ids"].cuda()  # 如果device有cuda, 否则改成 .to(model.device)
+attention_mask = inputs["attention_mask"].cuda()
 
+# ---- 3. 准备一个语言模型的损失函数(自回归) ----
+#   HuggingFace 的 LlamaForCausalLM.forward 支持 labels 即可自动返回loss
+labels = input_ids.clone()
 
-# Sort and print results
-print("LLaMA 7B Layer-wise Importance Based on Activation Variance:")
-for layer in range(32):
-    sorted_vars = sorted(variance_results[layer].items(), key=lambda x: x[1], reverse=True)
-    print(f"Layer {layer}: {sorted_vars}")
+with torch.no_grad():
+    # 先测下生成
+    out_text = model.generate(input_ids, max_new_tokens=20)
+    print("Sample generate:", tokenizer.decode(out_text[0]))
+
+# 我们需要计算 Hessian 的对角线 => 需要create_graph=True, 不能no_grad
+def forward_loss(model, input_ids, attention_mask, labels):
+    outputs = model(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        labels=labels
+    )
+    # outputs.loss: CrossEntropyLoss of next-token-pred
+    return outputs.loss
+
+# ---- 4. Hessian对角近似 (Pearlmutter) ----
+def hessian_diag(model, loss):
+    """
+    使用Pearlmutter trick近似Hessian对角线.
+    返回:
+      g (flatten): dLoss/dParams
+      h (flatten): diag(H)
+    """
+    grads = torch.autograd.grad(loss, model.parameters(), create_graph=True)
+
+    # flatten grads
+    flat_grads = []
+    params_list = []
+    for g, p in zip(grads, model.parameters()):
+        flat_grads.append(g.reshape(-1))
+        params_list.append(p)
+    full_g = torch.cat(flat_grads)  # [N]
+
+    # Hessian diag ~ hvp / g, 当 v = g
+    # hvp = d/dp( sum_i g_i^2 ) => 2H*g?
+    # 这里做简化 => hvp = grad( (full_g * full_g).sum(), params )
+    # (full_g*full_g).sum() = g^T g
+    # 计算
+    hvp_tensors = torch.autograd.grad(
+        (full_g * full_g).sum(),  # g^T g
+        params_list,
+        create_graph=False
+    )
+
+    # hvp / g => diag(H)
+    flat_h = []
+    offset = 0
+    for g_i, hvp_i in zip(flat_grads, hvp_tensors):
+        hvp_i_flat = hvp_i.reshape(-1)
+        # 避免除0
+        h_i = torch.zeros_like(hvp_i_flat)
+        mask = (g_i.abs() > 1e-15)
+        h_i[mask] = hvp_i_flat[mask] / g_i[mask]
+        flat_h.append(h_i)
+
+    full_h = torch.cat(flat_h)  # diag(H)
+    return full_g.detach(), full_h.detach()
+
+# ---- 5. 运行一次前向+后向, 得到 (g,h) 并计算子模块得分 ----
+def compute_importance_scores(model, input_ids, attention_mask, labels):
+    model.zero_grad()
+    loss = forward_loss(model, input_ids, attention_mask, labels)
+    g, h = hessian_diag(model, loss)
+
+    # 二阶score: score_i = 0.5 * w_i^2 * h_i
+    # 先flatten所有param
+    offset = 0
+    scores_each_param = torch.zeros_like(g)
+    param_info = []
+    for p in model.parameters():
+        n = p.numel()
+        w_flat = p.detach().reshape(-1)
+        # 计算 local_score
+        local_g = g[offset: offset+n]
+        local_h = h[offset: offset+n]
+        local_score = 0.5 * (w_flat**2) * local_h
+        scores_each_param[offset: offset+n] = local_score
+        param_info.append((p, offset, offset+n))
+        offset += n
+
+    # 按 Q/K/V/OUT/GATE/UP/DOWN 分类
+    module_scores = {"Q":0,"K":0,"V":0,"OUT":0,"GATE":0,"UP":0,"DOWN":0}
+    offset = 0
+    for (name, param) in model.named_parameters():
+        n = param.numel()
+        seg = scores_each_param[offset : offset+n]
+        s_val = seg.sum().item()
+        offset += n
+
+        # 识别Q/K/V/GATE/UP/DOWN/OUT
+        # 以LLaMA的param命名为例, 可能是: 
+        # - "model.layers.X.self_attn.q_proj.weight"
+        # - "model.layers.X.mlp.gate_proj.weight"
+        # - "model.layers.X.mlp.up_proj.weight"
+        # - "model.layers.X.mlp.down_proj.weight"
+        # - "model.layers.X.self_attn.o_proj.weight" (out)
+        # - ...
+        # 这里做简单关键字判断:
+        lname = name.lower()
+        if "q_proj" in lname:
+            module_scores["Q"] += s_val
+        elif "k_proj" in lname:
+            module_scores["K"] += s_val
+        elif "v_proj" in lname:
+            module_scores["V"] += s_val
+        elif "gate_proj" in lname:
+            module_scores["GATE"] += s_val
+        elif "up_proj" in lname:
+            module_scores["UP"] += s_val
+        elif "down_proj" in lname:
+            module_scores["DOWN"] += s_val
+        elif "o_proj" in lname or "out_proj" in lname:
+            module_scores["OUT"] += s_val
+        else:
+            pass
+
+    return module_scores
+
+# 实际执行:
+loss = forward_loss(model, input_ids, attention_mask, labels)
+print("Loss on our tiny wikitext-2 sample: ", loss.item())
+
+# 由于二阶需要 create_graph=True, 我们再单独跑:
+model.zero_grad()
+scores_dict = compute_importance_scores(model, input_ids, attention_mask, labels)
+
+# 排序看谁更大
+sorted_items = sorted(scores_dict.items(), key=lambda x: x[1], reverse=True)
+print("=== Module importance (Hessian diag) ===")
+for k,v in sorted_items:
+    print(f"{k} => {v:.4e}")
+
+# 这样就可以看到Gate/Up/Down等各自的二阶敏感度分数
