@@ -14,7 +14,7 @@ mean_diff = sum(differences) / len(differences)
 s = 0.014
 
 # 计算每个组件的权重
-weights = [default_weight - s * (d - mean_diff) for d in differences]
+weights = [default_weight + s * (d - mean_diff) for d in differences]
 
 # 输出结果
 for comp, w in zip(components, weights):
