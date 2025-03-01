@@ -73,14 +73,7 @@ data = []
 for layer, values in variance_results.items():
     for key, var in values.items():
         data.append([layer, key, var])
-df = pd.DataFrame(data, columns=["Layer", "Component", "Variance"])
 
-# Plot heatmap
-pivot_table = df.pivot("Layer", "Component", "Variance")
-plt.figure(figsize=(10, 6))
-sns.heatmap(pivot_table, cmap="coolwarm", annot=True, fmt=".2f")
-plt.title("LLaMA Layer-wise Activation Variance")
-plt.show()
 
 # Print sorted variance results per layer
 print("Layer Importance Based on Activation Variance:")
