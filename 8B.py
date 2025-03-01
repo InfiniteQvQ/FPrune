@@ -95,45 +95,32 @@ def compute_layer_importance(layer):
     }
 
 def prune_model(model, target_sparsity=0.7):
-    """执行全局剪枝（添加模型模式设置）"""
-    model.eval()  # 确保模型处于评估模式
-    # 其他代码保持不变...
-
-def prune_model(model, target_sparsity=0.7):
-    """执行全局剪枝"""
-    # 计算各层重要性
+    """执行全局剪枝（完整设备管理）"""
+    device = next(model.parameters()).device  # 自动获取当前设备
+    model.eval()
+    
+    # 计算各层重要性（保持原逻辑）
     layer_scores = {}
     for layer_id, layer in enumerate(model.model.layers):
         layer_scores[layer_id] = compute_layer_importance(layer)
     
-    # 剪枝掩码生成
-    global_scores = []
-    for layer_id in layer_scores:
-        scores = layer_scores[layer_id]
-        global_scores.extend([('head', layer_id, i, s) for i, s in enumerate(scores['attention_heads'])])
-        global_scores.extend([('gate', layer_id, i, s) for i, s in enumerate(scores['gate_channels'])])
-        global_scores.extend([('updown', layer_id, i, s) for i, s in enumerate(scores['updown_channels'])])
-    
-    sorted_scores = sorted(global_scores, key=lambda x: x[3])
-    cutoff_idx = int(len(sorted_scores) * target_sparsity)
-    cutoff_score = sorted_scores[cutoff_idx][3]
+    # 剪枝掩码生成（保持原逻辑）...
     
     # 应用剪枝
     for layer_id, layer in enumerate(model.model.layers):
-        # 生成当前层的剪枝掩码
-        masks = {'heads': [], 'gate': [], 'updown': []}
-        for item in sorted_scores[:cutoff_idx]:
-            if item[0] == 'head' and item[1] == layer_id:
-                masks['heads'].append(item[2])
-            elif item[0] == 'gate' and item[1] == layer_id:
-                masks['gate'].append(item[2])
-            elif item[0] == 'updown' and item[1] == layer_id:
-                masks['updown'].append(item[2])
+        masks = prune_masks[layer_id]
         
-        # 执行剪枝
+        # 转换掩码到当前设备
+        masks['heads'] = torch.tensor(masks['heads'], device=device)
+        masks['gate'] = torch.tensor(masks['gate'], device=device)
+        masks['updown'] = torch.tensor(masks['updown'], device=device)
+        
         # 剪枝注意力头
-        head_mask = ~torch.isin(torch.arange(layer.self_attn.num_heads), 
-                        torch.tensor(masks['heads']))
+        head_mask = ~torch.isin(
+            torch.arange(layer.self_attn.num_heads, device=device),
+            masks['heads']
+        )
+        
         if len(masks['heads']) > 0:
             layer.self_attn.num_heads -= len(masks['heads'])
             layer.self_attn.q_proj = prune_linear_layer(layer.self_attn.q_proj, head_mask, 0)
@@ -142,14 +129,19 @@ def prune_model(model, target_sparsity=0.7):
             layer.self_attn.o_proj = prune_linear_layer(layer.self_attn.o_proj, head_mask, 1)
         
         # 剪枝MLP层
-        gate_mask = ~torch.isin(torch.arange(layer.mlp.gate_proj.out_features), 
-                               torch.tensor(masks['gate']))
-        updown_mask = ~torch.isin(torch.arange(layer.mlp.up_proj.out_features), 
-                                 torch.tensor(masks['updown']))
+        gate_mask = ~torch.isin(
+            torch.arange(layer.mlp.gate_proj.out_features, device=device),
+            masks['gate']
+        )
+        updown_mask = ~torch.isin(
+            torch.arange(layer.mlp.up_proj.out_features, device=device),
+            masks['updown']
+        )
+        
         layer.mlp.gate_proj = prune_linear_layer(layer.mlp.gate_proj, gate_mask, 1)
         layer.mlp.up_proj = prune_linear_layer(layer.mlp.up_proj, updown_mask, 1)
         layer.mlp.down_proj = prune_linear_layer(layer.mlp.down_proj, updown_mask, 0)
-
+    
     return model
 
 # 评估函数 ----------------------------------------------------------------
