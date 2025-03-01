@@ -791,19 +791,19 @@ def ww_sparsity_llama3_8b_split(args, model, device=torch.device("cuda:0"),
 
     for i in range(32):
         #Q
-        res.append(combined_ratios[i*7] * 0.147493 * 7)
+        res.append(combined_ratios[i*7] * 0.148 * 7)
         #K
-        res.append(combined_ratios[i*7] * 0.144997 * 7)
+        res.append(combined_ratios[i*7] * 0.142 * 7)
         #V
-        res.append(combined_ratios[i*7] * 0.144217 * 7)
+        res.append(combined_ratios[i*7] * 0.142 * 7)
         #OUT
-        res.append(combined_ratios[i*7] *  0.142969 * 7)
+        res.append(combined_ratios[i*7] *  0.142 * 7)
         #GATE
-        res.append(combined_ratios[i*7] * 0.139225  * 7)
+        res.append(combined_ratios[i*7] * 0.142  * 7)
         #UP
-        res.append(combined_ratios[i*7] *  0.139927 * 7)
+        res.append(combined_ratios[i*7] *  0.142 * 7)
         #DOWN
-        res.append(combined_ratios[i*7] * 0.141175 * 7)
+        res.append(combined_ratios[i*7] * 0.142 * 7)
 
     res = torch.tensor(res, dtype=torch.float32)
     print("sum : ", res.sum() / (7*32))
