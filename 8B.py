@@ -49,48 +49,55 @@ def prune_linear_layer(layer, mask, dim):
     return pruned_layer
 
 def compute_layer_importance(layer):
-    """计算层重要性（适配GQA结构）"""
+    """计算层重要性（适配GQA结构并分离梯度）"""
     scores = {}
     
-    # 获取注意力头参数
-    num_heads = layer.self_attn.num_heads
-    num_key_value_heads = layer.self_attn.num_key_value_heads
-    head_dim = layer.self_attn.head_dim
+    # 禁用梯度计算以节省内存
+    with torch.no_grad():
+        # 获取注意力头参数
+        num_heads = layer.self_attn.num_heads
+        num_key_value_heads = layer.self_attn.num_key_value_heads
+        head_dim = layer.self_attn.head_dim
 
-    # 计算查询头重要性
-    q_proj = layer.self_attn.q_proj.weight  # [hidden_size, num_heads*head_dim]
-    q_heads = q_proj.view(-1, num_heads, head_dim)
-    q_importance = torch.norm(q_heads, p=2, dim=(0,2))  # [num_heads]
-    
-    # 计算键值头重要性
-    k_proj = layer.self_attn.k_proj.weight  # [hidden_size, num_kv_heads*head_dim]
-    k_heads = k_proj.view(-1, num_key_value_heads, head_dim)
-    k_importance = torch.norm(k_heads, p=2, dim=(0,2))  # [num_kv_heads]
-    
-    v_proj = layer.self_attn.v_proj.weight
-    v_heads = v_proj.view(-1, num_key_value_heads, head_dim)
-    v_importance = torch.norm(v_heads, p=2, dim=(0,2))  # [num_kv_heads]
-    
-    # 扩展键值头重要性以匹配查询头
-    group_size = num_heads // num_key_value_heads
-    expanded_k = k_importance.repeat_interleave(group_size)
-    expanded_v = v_importance.repeat_interleave(group_size)
-    
-    # 合并重要性（Q:50%, K:30%, V:20%）
-    head_importance = q_importance*0.5 + expanded_k*0.3 + expanded_v*0.2
+        # 计算查询头重要性（Q）
+        q_proj = layer.self_attn.q_proj.weight.detach()
+        q_heads = q_proj.view(-1, num_heads, head_dim)
+        q_importance = torch.norm(q_heads, p=2, dim=(0,2))  # [num_heads]
+        
+        # 计算键值头重要性（K/V）
+        k_proj = layer.self_attn.k_proj.weight.detach()
+        k_heads = k_proj.view(-1, num_key_value_heads, head_dim)
+        k_importance = torch.norm(k_heads, p=2, dim=(0,2))  # [num_kv_heads]
+        
+        v_proj = layer.self_attn.v_proj.weight.detach()
+        v_heads = v_proj.view(-1, num_key_value_heads, head_dim)
+        v_importance = torch.norm(v_heads, p=2, dim=(0,2))  # [num_kv_heads]
+        
+        # 扩展键值头重要性以匹配查询头
+        group_size = num_heads // num_key_value_heads
+        expanded_k = k_importance.repeat_interleave(group_size)
+        expanded_v = v_importance.repeat_interleave(group_size)
+        
+        # 合并重要性（Q:50%, K:30%, V:20%）
+        head_importance = q_importance*0.5 + expanded_k*0.3 + expanded_v*0.2
 
-    # MLP门控结构重要性（保持原逻辑）
-    gate = layer.mlp.gate_proj.weight
-    up = layer.mlp.up_proj.weight
-    down = layer.mlp.down_proj.weight
-    gate_importance = torch.norm(gate, p=1, dim=0)
-    updown_importance = (torch.norm(up, p=1, dim=0) + torch.norm(down, p=1, dim=1))/2
+        # MLP门控结构重要性（保持原逻辑）
+        gate = layer.mlp.gate_proj.weight.detach()
+        up = layer.mlp.up_proj.weight.detach()
+        down = layer.mlp.down_proj.weight.detach()
+        gate_importance = torch.norm(gate, p=1, dim=0)
+        updown_importance = (torch.norm(up, p=1, dim=0) + torch.norm(down, p=1, dim=1))/2
     
     return {
         'attention_heads': head_importance.cpu().numpy(),
         'gate_channels': gate_importance.cpu().numpy(),
         'updown_channels': updown_importance.cpu().numpy()
     }
+
+def prune_model(model, target_sparsity=0.7):
+    """执行全局剪枝（添加模型模式设置）"""
+    model.eval()  # 确保模型处于评估模式
+    # 其他代码保持不变...
 
 def prune_model(model, target_sparsity=0.7):
     """执行全局剪枝"""
