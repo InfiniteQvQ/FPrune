@@ -95,22 +95,39 @@ def compute_layer_importance(layer):
     }
 
 def prune_model(model, target_sparsity=0.7):
-    """执行全局剪枝（完整设备管理）"""
-    device = next(model.parameters()).device  # 自动获取当前设备
+    """执行全局剪枝（修复prune_masks未定义问题）"""
+    device = next(model.parameters()).device
     model.eval()
     
-    # 计算各层重要性（保持原逻辑）
+    # 步骤1：计算各层重要性
     layer_scores = {}
     for layer_id, layer in enumerate(model.model.layers):
         layer_scores[layer_id] = compute_layer_importance(layer)
     
-    # 剪枝掩码生成（保持原逻辑）...
+    # 步骤2：生成全局剪枝掩码（新增这部分）
+    global_scores = []
+    for layer_id in layer_scores:
+        scores = layer_scores[layer_id]
+        global_scores.extend([('head', layer_id, i, s) for i, s in enumerate(scores['attention_heads'])])
+        global_scores.extend([('gate', layer_id, i, s) for i, s in enumerate(scores['gate_channels'])])
+        global_scores.extend([('updown', layer_id, i, s) for i, s in enumerate(scores['updown_channels'])])
     
-    # 应用剪枝
+    sorted_scores = sorted(global_scores, key=lambda x: x[3])
+    cutoff_idx = int(len(sorted_scores) * target_sparsity)
+    prune_masks = {layer_id: {'heads': [], 'gate': [], 'updown': []} for layer_id in range(len(model.model.layers))}
+    
+    for item in sorted_scores[:cutoff_idx]:
+        type_, layer_id, idx, _ = item
+        if type_ == 'head':
+            prune_masks[layer_id]['heads'].append(idx)
+        elif type_ == 'gate':
+            prune_masks[layer_id]['gate'].append(idx)
+        elif type_ == 'updown':
+            prune_masks[layer_id]['updown'].append(idx)
+    
+    # 步骤3：应用剪枝
     for layer_id, layer in enumerate(model.model.layers):
         masks = prune_masks[layer_id]
-        
-        # 转换掩码到当前设备
         masks['heads'] = torch.tensor(masks['heads'], device=device)
         masks['gate'] = torch.tensor(masks['gate'], device=device)
         masks['updown'] = torch.tensor(masks['updown'], device=device)
