@@ -993,7 +993,128 @@ def prune_magnitude(args, model, tokenizer, device=torch.device("cuda:0"), prune
             k+=1
 
             W[W_mask] = 0
-    
+
+
+
+def get_gqa_groups(num_attention_heads, num_key_value_heads):
+    """
+    计算 GQA 结构的 Query-Value 头分组
+    """
+    gqa_groups = {}
+    for i in range(num_attention_heads):
+        kv_index = i % num_key_value_heads  # 计算 Query 头属于哪个 Key/Value 组
+        if kv_index not in gqa_groups:
+            gqa_groups[kv_index] = []
+        gqa_groups[kv_index].append(i)
+    return gqa_groups
+
+def validate_gqa_pruning(model):
+    """
+    检查 Wanda 剪枝后 GQA 结构是否完整
+    """
+    num_query_heads = model.config.num_attention_heads
+    num_key_value_heads = model.config.num_key_value_heads
+
+    gqa_groups = get_gqa_groups(num_query_heads, num_key_value_heads)
+
+    for kv_index, query_heads in gqa_groups.items():
+        remaining_heads = [h for h in query_heads if model.layers[0].self_attn.q_proj.weight[h].abs().sum() > 0]
+        assert len(remaining_heads) == 0 or len(remaining_heads) == len(query_heads), \
+            f"⚠️ GQA 组 {kv_index} 有部分 Query 头被剪掉！"
+
+def prune_gqa_wanda(args, model, tokenizer, prune_ratios, device=torch.device("cuda:0")):
+    """
+    支持 Grouped Query Attention (GQA) 的 Wanda 剪枝，支持每层每个 Query 头的剪枝比例
+    """
+    assert len(prune_ratios) == model.config.num_hidden_layers * model.config.num_attention_heads, \
+        f"传入的剪枝比例 `prune_ratios` 长度 {len(prune_ratios)} 不匹配 `layers * heads` {model.config.num_hidden_layers * model.config.num_attention_heads}!"
+
+    use_cache = model.config.use_cache 
+    model.config.use_cache = False 
+
+    print("📥 加载校准数据...")
+    dataloader, _ = get_loaders("c4", nsamples=args.nsamples, seed=args.seed, seqlen=model.seqlen, tokenizer=tokenizer)
+    print("✅ 数据集加载完成")
+
+    with torch.no_grad():
+        inps, outs, attention_mask, position_ids = prepare_calibration_input(model, dataloader, device)
+
+    print("📊 计算 GQA 分组...")
+    gqa_groups = get_gqa_groups(model.config.num_attention_heads, model.config.num_key_value_heads)
+
+    layers = model.model.layers
+
+    k = 0  # 记录剪枝层的索引
+    for i, layer in enumerate(layers):
+        subset = find_layers(layer)
+
+        if f"model.layers.{i}" in model.hf_device_map:
+            dev = model.hf_device_map[f"model.layers.{i}"]
+            print(f"🔹 使用 Wanda 进行剪枝: 层 {i}, 设备: {dev}")
+            inps, outs, attention_mask, position_ids = inps.to(dev), outs.to(dev), attention_mask.to(dev), position_ids.to(dev)
+
+        wrapped_layers = {}
+        for name in subset:
+            wrapped_layers[name] = WrappedGPT(subset[name])
+
+        def add_batch(name):
+            def tmp(_, inp, out):
+                wrapped_layers[name].add_batch(inp[0].data, out.data)
+            return tmp
+
+        handles = []
+        for name in wrapped_layers:
+            handles.append(subset[name].register_forward_hook(add_batch(name)))
+        
+        for j in range(args.nsamples):
+            with torch.no_grad():
+                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+
+        for h in handles:
+            h.remove()
+
+        for name in subset:
+            print(f"✂️ 剪枝层 {i}, 名称 {name}")
+
+            W_metric = torch.abs(subset[name].weight.data) * torch.sqrt(wrapped_layers[name].scaler_row.reshape((1, -1)))
+
+            W_mask = (torch.zeros_like(W_metric) == 1)  # 初始化剪枝 mask，全 False
+
+            if args.prune_n != 0:
+                for ii in range(W_metric.shape[1]):
+                    if ii % args.prune_m == 0:
+                        tmp = W_metric[:, ii:(ii + args.prune_m)].float()
+                        W_mask.scatter_(1, ii + torch.topk(tmp, args.prune_n, dim=1, largest=False)[1], True)
+            else:
+                sort_res = torch.sort(W_metric, dim=-1, stable=True)
+
+                pruned_heads = set()
+                for kv_index, query_heads in gqa_groups.items():
+                    query_scores = W_metric[:, query_heads].mean(dim=1)
+                    num_prune = int(len(query_heads) * prune_ratios[k])
+                    pruned_indices = query_scores.argsort()[:num_prune]
+
+                    for idx in pruned_indices:
+                        pruned_heads.add(query_heads[idx])
+
+                k += 1
+                W_mask[:, list(pruned_heads)] = True
+
+            subset[name].weight.data[W_mask] = 0  # 剪枝
+
+        for j in range(args.nsamples):
+            with torch.no_grad():
+                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+        
+        inps, outs = outs, inps
+
+    model.config.use_cache = use_cache 
+    torch.cuda.empty_cache()
+
+    print("✅ Wanda GQA 剪枝完成")
+    validate_gqa_pruning(model)
+
+
 
 def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, prune_m=0, ratios=None):
     use_cache = model.config.use_cache 
@@ -1219,7 +1340,7 @@ def prune_wanda_ww2(args, model, tokenizer, device=torch.device("cuda:0"), prune
 
     all_layer_ratio = ww_sparsity_llama3_8b_split(args, model, device, s1, s2)
     # wanda pruning
-    prune_wanda(args, model, tokenizer, device, ratios=all_layer_ratio)   
+    prune_gqa_wanda(args, model, tokenizer, device, ratios=all_layer_ratio)   
     
 def prune_sparsegpt_ww(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, prune_m=0):
     s1 = 1.0 - args.epsilon
