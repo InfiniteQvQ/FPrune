@@ -94,6 +94,37 @@ def compute_layer_importance(layer):
         'updown_channels': updown_importance.cpu().numpy()
     }
 
+def prune_linear_layer(layer, mask, dim):
+    """结构化剪枝线性层（增加安全检查）"""
+    if mask is None or mask.sum() == 0:
+        return layer
+    
+    device = layer.weight.device
+    indices = mask.nonzero().squeeze().to(device)
+    
+    # 防止零维度张量
+    if indices.numel() == 0:
+        return layer
+    
+    # 检查索引有效性
+    max_idx = layer.weight.shape[dim] - 1
+    if (indices > max_idx).any():
+        invalid_indices = indices[indices > max_idx]
+        indices = indices[indices <= max_idx]
+        print(f"警告：发现无效索引{invalid_indices}，已自动过滤")
+    
+    w = layer.weight.index_select(dim, indices)
+    
+    # 确保至少保留一个神经元
+    if w.shape[0] == 0 or w.shape[1] == 0:
+        raise ValueError(f"尝试创建零维度层：原始维度{layer.weight.shape}，剪枝后{w.shape}")
+    
+    pruned_layer = nn.Linear(w.size(1), w.size(0), bias=layer.bias is not None).to(device)
+    pruned_layer.weight.data.copy_(w)
+    if layer.bias is not None and dim == 1:
+        pruned_layer.bias.data.copy_(layer.bias)
+    return pruned_layer
+
 def prune_model(model, target_sparsity=0.7):
     """执行全局剪枝（修复prune_masks未定义问题）"""
     device = next(model.parameters()).device
@@ -128,6 +159,24 @@ def prune_model(model, target_sparsity=0.7):
     # 步骤3：应用剪枝
     for layer_id, layer in enumerate(model.model.layers):
         masks = prune_masks[layer_id]
+        
+        # 转换并过滤非法索引
+        def filter_indices(indices, max_val):
+            return [idx for idx in indices if idx < max_val]
+        
+        # 注意力头索引校验
+        max_heads = layer.self_attn.num_heads
+        masks['heads'] = filter_indices(masks['heads'], max_heads)
+        
+        # Gate投影校验
+        max_gate = layer.mlp.gate_proj.out_features
+        masks['gate'] = filter_indices(masks['gate'], max_gate)
+        
+        # Up/Down投影校验
+        max_updown = layer.mlp.up_proj.out_features
+        masks['updown'] = filter_indices(masks['updown'], max_updown)
+        
+        # 转换为张量
         masks['heads'] = torch.tensor(masks['heads'], device=device)
         masks['gate'] = torch.tensor(masks['gate'], device=device)
         masks['updown'] = torch.tensor(masks['updown'], device=device)
