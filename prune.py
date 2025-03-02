@@ -752,49 +752,37 @@ def ww_sparsity_llama3_8b_split(args, model, device=torch.device("cuda:0"),
     layerwise_pruning_ratios_esd = layerwise_pruning_ratios_esd.cpu().numpy().tolist()
     print("ESD-based ratios:", layerwise_pruning_ratios_esd)
 
-    res = []
-    modules = ["Q", "K", "V", "OUT", "GATE", "UP", "DOWN"]
-    def validate_allocation(layer_prune_amount, allocations, weight):
-        """验证剪枝量正确性"""
-        # 验证总量
-        assert sum(allocations.values()) == layer_prune_amount, f"剪枝量不匹配 预期{layer_prune_amount} 实际{sum(allocations.values())}"
-        
-        # 验证不超过参数量
-        for module, amount in allocations.items():
-            assert amount <= weight[i], f"{module} 剪枝量{amount}超过参数量{weight[i]}"
-    weight = np.array([16777216,4194304,4194304, 16777216,  58720256, 58720256, 58720256])
+    weight = np.array([16777216, 4194304, 4194304, 16777216, 58720256, 58720256, 58720256])
     importance_weights = np.array([0.12, 0.34, 0.34, 0.11, 0.03, 0.03, 0.03])
-    
+
     total_params = weight.sum()
-   
-    res = []
+    prune_ratios_per_layer = []  # 存储每层的剪枝百分比
+
+    # 遍历32层
     for i in range(32):
-        # 获取当前层剪枝比例
-        prune_ratio = layerwise_pruning_ratios_esd[i*7]  # 注意索引是否正确
+        # 获取当前层的剪枝比例（假设 `layerwise_pruning_ratios_esd` 提供每层的剪枝比例）
+        prune_ratio = layerwise_pruning_ratios_esd[i]  
         
-        # 计算当前层总剪枝量
+        # 计算当前层的剪枝量
         layer_prune_amount = int(total_params * prune_ratio)
         
-        # 基于权重的分配
+        # 计算每个模块的剪枝量
         float_alloc = layer_prune_amount * importance_weights
         int_alloc = np.floor(float_alloc).astype(int)
         
-        # 处理余数（关键步骤）
+        # 处理余数
         remainder = layer_prune_amount - int_alloc.sum()
         decimals = float_alloc - int_alloc
         for idx in np.argsort(-decimals)[:remainder]:
             int_alloc[idx] += 1
-        
-   
-        
-        res.extend(int_alloc.tolist())
 
-    # 最终验证
-    for i in range(32):
-        for j in range(7):
-            res[i+j] = res[i+j] / float(weight[j])
-    print(res)
-    return res
+        # 计算该层的剪枝百分比
+        layer_prune_percentage = int_alloc.sum() / total_params  # 计算当前层的剪枝百分比
+        
+        prune_ratios_per_layer.append(layer_prune_percentage)
+
+    # 输出每层的剪枝百分比
+    print(prune_ratios_per_layer)
 
 def ww_sparsity_llama3_8b(args, model, device=torch.device("cuda:0"),
                          s1=0.8, s2=1.2, ratios=None, prune_n=0, prune_m=0,
