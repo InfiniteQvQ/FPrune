@@ -790,9 +790,11 @@ def ww_sparsity_llama3_8b_split(args, model, device=torch.device("cuda:0"),
         res.extend(int_alloc.tolist())
 
     # 最终验证
-    total_pruned = sum(res)
+    for i in range(32):
+        for j in range(7):
+            res[i+j] = res[i+j] / float(weight[j])
     print(res)
-    print(total_pruned)
+    return res
 
 def ww_sparsity_llama3_8b(args, model, device=torch.device("cuda:0"),
                          s1=0.8, s2=1.2, ratios=None, prune_n=0, prune_m=0,
