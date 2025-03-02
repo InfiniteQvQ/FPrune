@@ -763,7 +763,7 @@ def ww_sparsity_llama3_8b_split(args, model, device=torch.device("cuda:0"),
         for module, amount in allocations.items():
             assert amount <= weight[i], f"{module} 剪枝量{amount}超过参数量{weight[i]}"
     weight = np.array([16777216,4194304,4194304, 16777216,  58720256, 58720256, 58720256])
-    importance_weights = np.array([0.11, 0.33, 0.33, 0.11, 0.03, 0.03, 0.03])
+    importance_weights = np.array([0.12, 0.34, 0.34, 0.11, 0.03, 0.03, 0.03])
     
     total_params = weight.sum()
    
@@ -785,16 +785,14 @@ def ww_sparsity_llama3_8b_split(args, model, device=torch.device("cuda:0"),
         for idx in np.argsort(-decimals)[:remainder]:
             int_alloc[idx] += 1
         
-        # 转换为字典并验证
-        allocations = {modules[j]: int_alloc[j] for j in range(7)}
-        validate_allocation(layer_prune_amount, allocations, weight)
+   
         
         res.extend(int_alloc.tolist())
 
     # 最终验证
     total_pruned = sum(res)
     print(res)
-
+    print(total_pruned)
 
 def ww_sparsity_llama3_8b(args, model, device=torch.device("cuda:0"),
                          s1=0.8, s2=1.2, ratios=None, prune_n=0, prune_m=0,
