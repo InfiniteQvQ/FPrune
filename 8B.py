@@ -5,19 +5,54 @@ from typing import Dict
 class GradNormCalculator:
     def __init__(self, model_name: str, cache_dir: str = "/root/autodl-tmp/llm_weights"):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        num_gpus = torch.cuda.device_count()
+        print("[Init] 可用 GPU 数量:", num_gpus)
         
+        # 如果 GPU 数量不足两个，则使用自动设备映射
+        if num_gpus < 2:
+            print("[Init] GPU 数量不足 2 个，使用自动设备映射")
+            device_map = "auto"
+        else:
+            print("[Init] 检测到多个 GPU，采用自定义 device_map 分布模型")
+            # 先加载到 CPU 上获取模型结构
+            model_temp = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                torch_dtype=torch.bfloat16,
+                cache_dir=cache_dir,
+                low_cpu_mem_usage=True,
+                device_map="cpu"
+            )
+            
+            # 判断模型结构：可能在 model.layers 或 model.decoder.layers 中
+            if hasattr(model_temp.model, "layers"):
+                layers = model_temp.model.layers
+                prefix = "model.layers"
+            elif hasattr(model_temp.model, "decoder") and hasattr(model_temp.model.decoder, "layers"):
+                layers = model_temp.model.decoder.layers
+                prefix = "model.decoder.layers"
+            else:
+                raise RuntimeError("无法定位到模型 decoder layers")
+            
+            num_layers = len(layers)
+            print(f"[Init] 模型共有 {num_layers} 层，前 {num_layers // 2} 层分配到 cuda:0，后续层分配到 cuda:1")
+            # 构造自定义 device_map：对每一层指定设备
+            device_map = {}
+            for i in range(num_layers):
+                device = "cuda:0" if i < num_layers // 2 else "cuda:1"
+                device_map[f"{prefix}.{i}"] = device
+            del model_temp  # 清理临时模型以节省内存
+
         print("[Init] Loading model:", model_name)
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
             torch_dtype=torch.bfloat16,
             cache_dir=cache_dir,
             low_cpu_mem_usage=True,
-            device_map="auto"  # 自动分配到多个GPU
+            device_map=device_map
         )
         
         print("[Init] Loading tokenizer:", model_name)
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         
@@ -36,23 +71,24 @@ class GradNormCalculator:
 
     def _hook_gradients(self, module, grad_in, grad_out, layer_idx: int):
         if grad_out[0] is not None:
-            # 确保梯度转移到CPU，并转换为float32避免精度问题
+            # 将梯度转移到 CPU 并转换为 float32，防止精度损失
             self.gradients[layer_idx] = grad_out[0].detach().to(device="cpu", dtype=torch.float32)
 
     def compute_gradnorm(self, num_samples: int = 8, seq_len: int = 128) -> Dict[int, float]:
         self.gradients.clear()
         layers = self.get_layers()
 
-        # 注册梯度钩子
+        # 为每一层注册反向传播钩子
         hooks = []
         for idx, layer in enumerate(layers):
             h = layer.register_full_backward_hook(
                 lambda m, gi, go, idx=idx: self._hook_gradients(m, gi, go, idx)
+            )
             hooks.append(h)
 
         self.model.train()
 
-        # 生成输入数据（确保数据在主设备）
+        # 生成输入数据
         input_texts = [
             "The quick brown fox jumps over the lazy dog.",
             "Artificial Intelligence is transforming the world.",
@@ -66,21 +102,21 @@ class GradNormCalculator:
             truncation=True, 
             max_length=seq_len
         )
-        input_ids = inputs["input_ids"].to(self.model.device)  # 使用模型所在的主设备
+        input_ids = inputs["input_ids"].to(self.model.device)  # 将输入数据放到模型所在设备
 
         # 前向传播
         outputs = self.model(input_ids, labels=input_ids)
         loss = outputs.loss
-        
-        # 反向传播
+
+        # 反向传播计算梯度
         loss.backward()
 
-        # 移除钩子
+        # 移除所有钩子，清理内存
         for h in hooks:
             h.remove()
         torch.cuda.empty_cache()
 
-        # 计算梯度范数
+        # 计算每一层梯度的范数
         gradnorm_per_layer = {}
         for layer_idx, grad in self.gradients.items():
             if grad is not None:
