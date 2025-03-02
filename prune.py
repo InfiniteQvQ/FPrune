@@ -753,7 +753,7 @@ def ww_sparsity_llama3_8b_split(args, model, device=torch.device("cuda:0"),
     print("ESD-based ratios:", layerwise_pruning_ratios_esd)
 
     weight = np.array([16777216, 4194304, 4194304, 16777216, 58720256, 58720256, 58720256])
-    importance_weights = np.array([0.12, 0.34, 0.34, 0.11, 0.03, 0.03, 0.03])
+    importance_weights = np.array([0.12, 0.28, 0.28, 0.12, 0.06, 0.07, 0.06])
 
     total_params_per_module = weight  # 每个模块的总参数量
     total_params = weight.sum()  # 所有模块参数总和
