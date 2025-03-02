@@ -1,215 +1,108 @@
 import torch
-import torch.nn as nn
-from tqdm import tqdm
+import numpy as np
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from typing import Dict
 
-class WrappedGPT:
-    """收集激活统计量"""
-    def __init__(self, layer):
-        self.layer = layer
-        self.activations = None
-        self.scaler_row = None
-    
-    def add_batch(self, inp, out):
-        # 计算输入特征的L2范数
-        inp = inp.detach()
-        if self.scaler_row is None:
-            self.scaler_row = torch.zeros(inp.shape[-1], device=inp.device)
-        self.scaler_row += inp.pow(2).sum(dim=0)
-
-class GQAWandaPruner:
-    def __init__(self, model, tokenizer, device="cuda"):
-        self.model = model
-        self.tokenizer = tokenizer
-        self.device = device
-        self.config = model.config
+class GradNormCalculator:
+    def __init__(self, model_name: str, cache_dir: str = "/root/autodl-tmp/llm_weights"):
+        """
+        初始化 LLM，加载模型和 tokenizer，并准备计算 GradNorm。
+        """
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
-        # 获取GQA配置
-        self.num_attention_heads = self.config.num_attention_heads
-        self.num_key_value_heads = getattr(self.config, "num_key_value_heads", self.num_attention_heads)
-        self.head_dim = self.config.hidden_size // self.num_attention_heads
-        self.groups_per_layer = self.num_attention_heads // self.num_key_value_heads
-
-    def prepare_calibration_input(self, nsamples=128, seqlen=4096):
-        """准备校准输入（LLaMA3专用）"""
-        dummy_input = torch.randint(0, self.tokenizer.vocab_size, (nsamples, seqlen)).to(self.device)
-        layers = self.model.model.layers
-        dtype = next(self.model.parameters()).dtype
+        print("[Init] Loading model:", model_name)
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype=torch.bfloat16,
+            cache_dir=cache_dir,
+            low_cpu_mem_usage=True,
+            device_map="auto"
+        ).to(self.device)
         
-        # 初始化缓存
-        inps = torch.zeros((nsamples, seqlen, self.config.hidden_size), dtype=dtype, device=self.device)
-        cache = {'i': 0}
+        print("[Init] Loading tokenizer:", model_name)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-        class Catcher(nn.Module):
-            def __init__(self, module):
-                super().__init__()
-                self.module = module
-            def forward(self, inp, **kwargs):
-                inps[cache['i']] = inp
-                cache['i'] += 1
-                cache['attention_mask'] = kwargs.get('attention_mask')
-                cache['position_ids'] = kwargs.get('position_ids')
-                raise ValueError
-
-        # 捕获输入
-        layers[0] = Catcher(layers[0])
-        try:
-            self.model(dummy_input)
-        except ValueError:
-            pass
-        layers[0] = layers[0].module  # 恢复原始层
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token  # 确保 padding token 存在
         
-        return inps, cache
+        self.config = self.model.config
+        self.gradients = {}
 
-    def prune(self, sparsity_ratio=0.5, per_group_ratios=None, nsamples=128):
-        """执行GQA剪枝"""
-        self.model.eval()
-        original_use_cache = self.config.use_cache 
-        self.config.use_cache = False
+    def get_layers(self):
+        """
+        获取 Transformer 的 Decoder 层，适用于 LLaMA、GPT-3.5、OPT 之类的自回归模型。
+        """
+        if hasattr(self.model, "model") and hasattr(self.model.model, "layers"):
+            return self.model.model.layers
+        elif (hasattr(self.model, "model") 
+              and hasattr(self.model.model, "decoder") 
+              and hasattr(self.model.model.decoder, "layers")):
+            return self.model.model.decoder.layers
+        else:
+            raise RuntimeError("无法定位到模型 decoder layers，请根据实际结构修改 get_layers()")
 
-        # 准备校准数据
-        print("Preparing calibration inputs...")
-        inps, cache = self.prepare_calibration_input(nsamples)
-        attention_mask = cache['attention_mask']
-        position_ids = cache['position_ids']
-        outs = torch.zeros_like(inps)
+    def _hook_gradients(self, module, grad_in, grad_out, layer_idx: int):
+        """
+        反向传播 Hook，存储每一层的梯度。
+        """
+        if grad_out[0] is not None:  # 确保梯度存在
+            self.gradients[layer_idx] = grad_out[0].detach().cpu()
 
-        # 逐层处理
-        layers = self.model.model.layers
-        for layer_idx in tqdm(range(len(layers)), desc="Pruning layers"):
-            layer = layers[layer_idx]
-            subset = find_layers(layer)
+    def compute_gradnorm(self, num_samples: int = 8, seq_len: int = 128) -> Dict[int, float]:
+        """
+        计算 GradNorm，使用真实文本输入，遍历所有 Transformer 层。
+        """
+        self.gradients.clear()
+        layers = self.get_layers()
 
-            # GQA剪枝核心
-            if "self_attn" in subset:
-                attn_layer = subset["self_attn"]
-                q_proj = attn_layer.q_proj
-                k_proj = attn_layer.k_proj
-                v_proj = attn_layer.v_proj
+        # 注册 Hook 以捕获梯度
+        hooks = []
+        for idx, layer in enumerate(layers):
+            h = layer.register_full_backward_hook(lambda m, gi, go, idx=idx: self._hook_gradients(m, gi, go, idx))
+            hooks.append(h)
 
-                # 收集激活统计量
-                wrapped_q = WrappedGPT(q_proj)
-                wrapped_k = WrappedGPT(k_proj)
-                wrapped_v = WrappedGPT(v_proj)
-                
-                handles = [
-                    q_proj.register_forward_hook(lambda m, inp, out: wrapped_q.add_batch(inp[0], out)),
-                    k_proj.register_forward_hook(lambda m, inp, out: wrapped_k.add_batch(inp[0], out)),
-                    v_proj.register_forward_hook(lambda m, inp, out: wrapped_v.add_batch(inp[0], out))
-                ]
+        self.model.train()  # 训练模式，确保梯度计算
 
-                # 前向传播收集数据
-                for j in range(nsamples):
-                    with torch.no_grad():
-                        layer(inps[j].unsqueeze(0), 
-                             attention_mask=attention_mask,
-                             position_ids=position_ids)
-                
-                # 移除hook
-                for h in handles:
-                    h.remove()
+        # 生成真实文本输入
+        input_texts = [
+            "The quick brown fox jumps over the lazy dog.",
+            "Artificial Intelligence is transforming the world.",
+            "In a distant future, humans and AI coexist in harmony.",
+            "OpenAI's ChatGPT demonstrates impressive reasoning capabilities."
+        ]
+        input_texts = input_texts * (num_samples // len(input_texts))  # 确保 num_samples 充足
+        inputs = self.tokenizer(
+            input_texts, return_tensors="pt", padding="max_length", truncation=True, max_length=seq_len
+        )
+        input_ids = inputs["input_ids"].to(self.device)
 
-                # 计算组重要性（Wanda指标）
-                group_imp = []
-                for group_id in range(self.num_key_value_heads):
-                    # 计算参数范围
-                    q_start = group_id * self.groups_per_layer * self.head_dim
-                    q_end = (group_id+1) * self.groups_per_layer * self.head_dim
-                    kv_start = group_id * self.head_dim
-                    kv_end = (group_id+1) * self.head_dim
-                    
-                    # Wanda重要性：|W| * sqrt(激活统计量)
-                    q_imp = (torch.abs(q_proj.weight[q_start:q_end]) * 
-                            torch.sqrt(wrapped_q.scaler_row)).sum()
-                    k_imp = (torch.abs(k_proj.weight[kv_start:kv_end]) * 
-                            torch.sqrt(wrapped_k.scaler_row)).sum()
-                    v_imp = (torch.abs(v_proj.weight[kv_start:kv_end]) * 
-                            torch.sqrt(wrapped_v.scaler_row)).sum()
-                    
-                    # 使用自定义比例或默认比例
-                    if per_group_ratios is not None:
-                        ratio = per_group_ratios[layer_idx][group_id]
-                    else:
-                        ratio = 1.0  # 默认全比例参与排序
-                        
-                    group_imp.append(ratio * (0.5*q_imp + 0.3*k_imp + 0.2*v_imp))
+        labels = input_ids.clone()  # 复制 input_ids 作为训练目标
+        outputs = self.model(input_ids, labels=labels)
+        loss = outputs.loss
+        loss.backward(retain_graph=True)  # 反向传播，确保梯度保留
 
-                # 选择要剪枝的组
-                total_groups = len(group_imp)
-                prune_num = int(total_groups * sparsity_ratio)
-                _, prune_indices = torch.topk(-torch.tensor(group_imp), prune_num)
-
-                # 生成剪枝掩码
-                def create_mask(dim, indices, is_query=False):
-                    mask = torch.ones(dim, dtype=torch.bool, device=self.device)
-                    for idx in indices:
-                        block = self.groups_per_layer*self.head_dim if is_query else self.head_dim
-                        start = idx * block
-                        end = start + block
-                        mask[start:end] = False
-                    return mask
-
-                # 应用剪枝
-                q_mask = create_mask(q_proj.out_features, prune_indices, is_query=True)
-                kv_mask = create_mask(k_proj.out_features, prune_indices)
-                
-                q_proj.weight.data[q_mask] = 0
-                k_proj.weight.data[kv_mask] = 0
-                v_proj.weight.data[kv_mask] = 0
-
-            # 更新中间表示
-            with torch.no_grad():
-                for j in range(nsamples):
-                    outs[j] = layer(inps[j].unsqueeze(0),
-                                  attention_mask=attention_mask,
-                                  position_ids=position_ids)[0]
-                inps, outs = outs, inps
-
-        # 恢复配置
-        self.config.use_cache = original_use_cache
+        # 移除 Hook，防止影响后续训练
+        for h in hooks:
+            h.remove()
         torch.cuda.empty_cache()
-        return self.model
 
-def find_layers(module, layers=[nn.Linear], name=''):
-    """递归查找指定类型的层"""
-    if type(module) in layers:
-        return {name: module}
-    res = {}
-    for name1, child in module.named_children():
-        res.update(find_layers(
-            child, layers=layers, 
-            name=name + '.' + name1 if name != '' else name1
-        ))
-    return res
+        # 计算 GradNorm
+        gradnorm_per_layer = {}
+        for layer_idx, grad in self.gradients.items():
+            grad_norm = torch.norm(grad).item()  # 计算 L2 范数
+            gradnorm_per_layer[layer_idx] = grad_norm
 
-# 使用示例 ---------------------------------------------------
+        return gradnorm_per_layer
+
+# -------------------- 执行 GradNorm 计算 --------------------
+
 if __name__ == "__main__":
-    # 加载模型
-    cache_dir = "/root/autodl-tmp/llm_weights"
-    model = AutoModelForCausalLM.from_pretrained(
-        "meta-llama/Meta-Llama-3-8B",
-        cache_dir=cache_dir,
-        device_map="auto",
-        torch_dtype=torch.float16
-    )
-    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B")
-    
-    # 初始化剪枝器
-    pruner = GQAWandaPruner(model, tokenizer)
-    
-    # 自定义每个组的剪枝比例（示例：32层 x 8组）
-    per_group_ratios = [
-        [0.8 if i < 4 else 0.2 for _ in range(8)]  # 前4组剪枝率高
-        for i in range(32)
-    ]
-    
-    # 执行剪枝（50%全局稀疏度）
-    pruned_model = pruner.prune(
-        sparsity_ratio=0.7,
-        per_group_ratios=per_group_ratios,
-        nsamples=128
-    )
-    
-    # 保存模型
-    pruned_model.save_pretrained("./pruned-llama3-8b")
-    tokenizer.save_pretrained("./pruned-llama3-8b")
+    model_name = "meta-llama/Meta-Llama-3-8B"  # 你可以替换成 LLaMA、GPT-3.5 或其他大模型
+    calculator = GradNormCalculator(model_name)
+
+    print("[Step 1] 计算 GradNorm ...")
+    gradnorm_results = calculator.compute_gradnorm(num_samples=8, seq_len=128)
+
+    print("[GradNorm 结果]")
+    for layer, norm in gradnorm_results.items():
+        print(f"Layer {layer}: GradNorm = {norm:.6f}")
