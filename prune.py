@@ -576,19 +576,19 @@ def ww_sparsity_llama_7b_split(args, model, device=torch.device("cuda:0"),
 
     for i in range(32):
         #Q
-        res.append(combined_ratios[i*7] * 0.149* 7 )
+        res.append(combined_ratios[i*7] * 0.142957* 7 )
         #K
-        res.append(combined_ratios[i*7]  *0.142392 * 7 )
+        res.append(combined_ratios[i*7]  *0.142807 * 7 )
         #V
-        res.append(combined_ratios[i*7]  *0.142392  * 7 )
+        res.append(combined_ratios[i*7]  *0.142807  * 7 )
         #OUT
-        res.append(combined_ratios[i*7]  * 0.142392 * 7  )
+        res.append(combined_ratios[i*7]  * 0.142857 * 7  )
         #GATE1
-        res.append(combined_ratios[i*7]  *0.141008  * 7   )
+        res.append(combined_ratios[i*7]  *0.142757  * 7   )
         #UP
-        res.append(combined_ratios[i*7]  *0.141908 * 7  )
+        res.append(combined_ratios[i*7]  *0.142907 * 7  )
         #DOWN
-        res.append(combined_ratios[i*7]  * 0.143008 * 7  )
+        res.append(combined_ratios[i*7]  * 0.142907 * 7  )
 
     return res
    
