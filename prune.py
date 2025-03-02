@@ -759,16 +759,16 @@ def ww_sparsity_llama3_8b_split(args, model, device=torch.device("cuda:0"),
         #K
         res.append(layerwise_pruning_ratios_esd[i*7]  *0.141982 * 7 )
         #V
-        res.append(layerwise_pruning_ratios_esd[i*7]  * 0.150107 * 7 )
+        res.append(layerwise_pruning_ratios_esd[i*7]  * 0.148107 * 7 )
         #OUT
         res.append(layerwise_pruning_ratios_esd[i*7]  * 0.142638 * 7  )
         #GATE1
-        res.append(layerwise_pruning_ratios_esd[i*7]  * 0.141795 * 7   )
+        res.append(layerwise_pruning_ratios_esd[i*7]  *0.142795  * 7   )
         #UP
-        res.append(layerwise_pruning_ratios_esd[i*7]  * 0.143495 * 7  )
+        res.append(layerwise_pruning_ratios_esd[i*7]  *0.142795 * 7  )
         #DOWN
 
-        res.append(layerwise_pruning_ratios_esd[i*7]  * 0.143295 * 7  )
+        res.append(layerwise_pruning_ratios_esd[i*7]  * 0.142795 * 7  )
     print(res)
     return res
     
