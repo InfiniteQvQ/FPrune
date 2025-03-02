@@ -30,7 +30,7 @@ def count_parameters(model):
 if __name__ == "__main__":
     cache_dir = "/root/autodl-tmp/llm_weights"
     model = AutoModelForCausalLM.from_pretrained(
-        "pinkmanlove/llama-7b-hf",
+        "meta-llama/Meta-Llama-3-8B",
         cache_dir=cache_dir,
         device_map="auto",
         torch_dtype=torch.float16
