@@ -751,24 +751,64 @@ def ww_sparsity_llama3_8b_split(args, model, device=torch.device("cuda:0"),
     layerwise_pruning_ratios_esd = layerwise_pruning_ratios_esd * scaler
     layerwise_pruning_ratios_esd = layerwise_pruning_ratios_esd.cpu().numpy().tolist()
     print("ESD-based ratios:", layerwise_pruning_ratios_esd)
+    importance = np.array([
+        12.546171, 10.435930, 8.065256, 6.466198, 5.112528, 4.219878, 3.586657, 3.161794,
+        2.979711, 2.802891, 2.699207, 2.560361, 2.295441, 2.088360, 1.845437, 1.697667,
+        1.518067, 1.401252, 1.329280, 1.233901, 1.145223, 1.061416, 0.994949, 0.928793,
+        0.857506, 0.733086, 0.569601, 0.463243, 0.415938, 0.276903, 0.135929, 0.099299
+    ])
+    I_min = np.min(importance)
+    I_max = np.max(importance)
+    norm_importance = (importance - I_min) / (I_max - I_min)
+    # 反转：重要性越高（数值大）希望剪枝比例越低
+    pre_ratio = 1 - norm_importance
+    avg_pre_ratio = np.mean(pre_ratio)
+    print("Preliminary importance ratios:", pre_ratio)
+    print("Average of importance preliminary ratios:", avg_pre_ratio)
+    target_avg = args.sparsity_ratio  # 这里假设 args.sparsity_ratio 代表全局目标剪枝率（例如0.5）
+    scale_factor = target_avg / avg_pre_ratio
+    final_ratios_importance = pre_ratio * scale_factor
+    final_ratios_importance = np.clip(final_ratios_importance, 0.0, 0.99)
+    # 扩展：每个 transformer 层内有 layer_num_in_block 子层（例如7个）
+    importance_ratios_expanded = []
+    for i in final_ratios_importance:
+        for j in range(layer_num_in_block):
+            importance_ratios_expanded.append(i)
+    print("Importance-based expanded ratios:", importance_ratios_expanded)
+    
+    # ---------------------- 结合两种比例 ----------------------
+    # 这里采用加权平均方式，将 ESD-based 和 importance-based 比例融合
+    # weight_esd 为权重，默认为0.5，两者各占一半
+    if len(layerwise_pruning_ratios_esd) != len(importance_ratios_expanded):
+        raise ValueError("Length mismatch between ESD-based and importance-based ratios!")
+    
+    combined_ratios = []
+    for r_esd, r_imp in zip(layerwise_pruning_ratios_esd, importance_ratios_expanded):
+        combined = weight_esd * r_esd + (1 - weight_esd) * r_imp
+        combined = min(combined, 1.0)
+        combined_ratios.append(combined)
+    
+    print("Combined layerwise pruning ratios:", combined_ratios)
+
+
     res = []
 
     for i in range(32):
         #Q
-        res.append(layerwise_pruning_ratios_esd[i*7] *0.142638 * 7 )
+        res.append(combined_ratios[i*7] *0.142638 * 7 )
         #K
-        res.append(layerwise_pruning_ratios_esd[i*7]  *0.141982 * 7 )
+        res.append(combined_ratios[i*7]  *0.141982 * 7 )
         #V
-        res.append(layerwise_pruning_ratios_esd[i*7]  * 0.148107 * 7 )
+        res.append(combined_ratios[i*7]  * 0.148107 * 7 )
         #OUT
-        res.append(layerwise_pruning_ratios_esd[i*7]  * 0.142638 * 7  )
+        res.append(combined_ratios[i*7]  * 0.142638 * 7  )
         #GATE1
-        res.append(layerwise_pruning_ratios_esd[i*7]  *0.142795  * 7   )
+        res.append(combined_ratios[i*7]  *0.142795  * 7   )
         #UP
-        res.append(layerwise_pruning_ratios_esd[i*7]  *0.142795 * 7  )
+        res.append(combined_ratios[i*7]  *0.142795 * 7  )
         #DOWN
 
-        res.append(layerwise_pruning_ratios_esd[i*7]  * 0.142795 * 7  )
+        res.append(combined_ratios[i*7]  * 0.142795 * 7  )
     print(res)
     return res
     
