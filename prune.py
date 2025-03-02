@@ -787,7 +787,7 @@ def ww_sparsity_llama3_8b_split(args, model, device=torch.device("cuda:0"),
     
     print("Combined layerwise pruning ratios:", combined_ratios)
  
-
+    return combined_ratios
     res = []
 
     for i in range(32):
