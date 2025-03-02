@@ -762,23 +762,23 @@ def ww_sparsity_llama3_8b_split(args, model, device=torch.device("cuda:0"),
     for i in range(32):
      
         #Q
-        res.append(layerwise_pruning_ratios_esd[i*7] * weight[0] / total_params *  0.142 * 7)
+        res.append(layerwise_pruning_ratios_esd[i*7] * weight[0] / total_params  * 7)
         #K
-        res.append(layerwise_pruning_ratios_esd[i*7] * weight[1] / total_params * 0.145 * 7)
+        res.append(layerwise_pruning_ratios_esd[i*7] * weight[1] / total_params * 7)
         #V
-        res.append(layerwise_pruning_ratios_esd[i*7] * weight[2] / total_params * 0.145 * 7)
+        res.append(layerwise_pruning_ratios_esd[i*7] * weight[2] / total_params * 7)
         #OUT
-        res.append(layerwise_pruning_ratios_esd[i*7] * weight[3] / total_params *  0.142 * 7)
+        res.append(layerwise_pruning_ratios_esd[i*7] * weight[3] / total_params * 7)
         #GATE
-        res.append(layerwise_pruning_ratios_esd[i*7] * weight[4] / total_params * 0.142  * 7)
+        res.append(layerwise_pruning_ratios_esd[i*7] * weight[4] / total_params * 7)
         #UP
-        res.append(layerwise_pruning_ratios_esd[i*7] * weight[5] / total_params * 0.142 * 7)
+        res.append(layerwise_pruning_ratios_esd[i*7] * weight[5] / total_params * 7)
         #DOWN
-        res.append(layerwise_pruning_ratios_esd[i*7] * weight[6] / total_params *0.142 * 7)
+        res.append(layerwise_pruning_ratios_esd[i*7] * weight[6] / total_params * 7)
        
 
     print(res)
-    
+
 
 def ww_sparsity_llama3_8b(args, model, device=torch.device("cuda:0"),
                          s1=0.8, s2=1.2, ratios=None, prune_n=0, prune_m=0,
