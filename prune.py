@@ -759,8 +759,8 @@ def ww_sparsity_llama3_8b_split(args, model, device=torch.device("cuda:0"),
     ])
     I_min = np.min(importance)
     I_max = np.max(importance)
-    s3 = 0.7
-    s4 = 0.9
+    s3 = 0.95
+    s4 = 1
     norm_importance = ((importance - I_min) / (I_max - I_min) * (s4 - s3) + s4)
     # 反转：重要性越高（数值大）希望剪枝比例越低
     pre_ratio = 1 - norm_importance
