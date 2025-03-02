@@ -755,15 +755,17 @@ def ww_sparsity_llama3_8b_split(args, model, device=torch.device("cuda:0"),
     weight = np.array([16777216, 4194304, 4194304, 16777216, 58720256, 58720256, 58720256])
     importance_weights = np.array([0.12, 0.34, 0.34, 0.11, 0.03, 0.03, 0.03])
 
-    total_params = weight.sum()
-    prune_ratios_per_layer = []  # 存储每层的剪枝百分比
+    total_params_per_module = weight  # 每个模块的总参数量
+    total_params = weight.sum()  # 所有模块参数总和
 
-    # 遍历32层
+    prune_ratios_flat = []  # 存储 7×32 的 1D 剪枝百分比列表
+
+    # 遍历 32 层
     for i in range(32):
         # 获取当前层的剪枝比例（假设 `layerwise_pruning_ratios_esd` 提供每层的剪枝比例）
-        prune_ratio = layerwise_pruning_ratios_esd[i]  
+        prune_ratio = layerwise_pruning_ratios_esd[i*7]  
         
-        # 计算当前层的剪枝量
+        # 计算当前层总剪枝量
         layer_prune_amount = int(total_params * prune_ratio)
         
         # 计算每个模块的剪枝量
@@ -776,13 +778,13 @@ def ww_sparsity_llama3_8b_split(args, model, device=torch.device("cuda:0"),
         for idx in np.argsort(-decimals)[:remainder]:
             int_alloc[idx] += 1
 
-        # 计算该层的剪枝百分比
-        layer_prune_percentage = int_alloc.sum() / total_params  # 计算当前层的剪枝百分比
+        # 计算该层每个模块的剪枝百分比，并存入 1D 列表
+        layer_prune_percentage = int_alloc / total_params_per_module  # 归一化为当前模块的剪枝比例
         
-        prune_ratios_per_layer.append(layer_prune_percentage)
+        prune_ratios_flat.extend(layer_prune_percentage.tolist())  # 转成列表追加
 
-    # 输出每层的剪枝百分比
-    print(prune_ratios_per_layer)
+    # 输出最终的 7×32 1D 剪枝比例
+    print(prune_ratios_flat)
 
 def ww_sparsity_llama3_8b(args, model, device=torch.device("cuda:0"),
                          s1=0.8, s2=1.2, ratios=None, prune_n=0, prune_m=0,
