@@ -753,30 +753,46 @@ def ww_sparsity_llama3_8b_split(args, model, device=torch.device("cuda:0"),
     print("ESD-based ratios:", layerwise_pruning_ratios_esd)
 
     res = []
-
+    modules = ["Q", "K", "V", "OUT", "GATE", "UP", "DOWN"]
+    def validate_allocation(layer_prune_amount, allocations, weight):
+        """验证剪枝量正确性"""
+        # 验证总量
+        assert sum(allocations.values()) == layer_prune_amount, f"剪枝量不匹配 预期{layer_prune_amount} 实际{sum(allocations.values())}"
+        
+        # 验证不超过参数量
+        for module, amount in allocations.items():
+            assert amount <= weight[i], f"{module} 剪枝量{amount}超过参数量{weight[i]}"
     weight = np.array([16777216,4194304,4194304, 16777216,  58720256, 58720256, 58720256])
- 
+    importance_weights = np.array([0.11, 0.33, 0.33, 0.11, 0.03, 0.03, 0.03])
     
-    total_params = np.sum(weight)
+    total_params = weight.sum()
    
+    res = []
     for i in range(32):
-     
-        #Q
-        res.append(layerwise_pruning_ratios_esd[i*7] * weight[0] / total_params * 0.11 * 7 * 7)
-        #K
-        res.append(layerwise_pruning_ratios_esd[i*7] * weight[1] / total_params * 0.33 * 7 * 7)
-        #V
-        res.append(layerwise_pruning_ratios_esd[i*7] * weight[2] / total_params * 0.33 * 7 * 7)
-        #OUT
-        res.append(layerwise_pruning_ratios_esd[i*7] * weight[3] / total_params * 0.11 * 7 * 7)
-        #GATE
-        res.append(layerwise_pruning_ratios_esd[i*7] * weight[4] / total_params * 0.03 * 7 * 7)
-        #UP
-        res.append(layerwise_pruning_ratios_esd[i*7] * weight[5] / total_params * 0.03 * 7 * 7)
-        #DOWN
-        res.append(layerwise_pruning_ratios_esd[i*7] * weight[6] / total_params * 0.03 * 7 * 7) 
-       
+        # 获取当前层剪枝比例
+        prune_ratio = layerwise_pruning_ratios_esd[i*7]  # 注意索引是否正确
+        
+        # 计算当前层总剪枝量
+        layer_prune_amount = int(total_params * prune_ratio)
+        
+        # 基于权重的分配
+        float_alloc = layer_prune_amount * importance_weights
+        int_alloc = np.floor(float_alloc).astype(int)
+        
+        # 处理余数（关键步骤）
+        remainder = layer_prune_amount - int_alloc.sum()
+        decimals = float_alloc - int_alloc
+        for idx in np.argsort(-decimals)[:remainder]:
+            int_alloc[idx] += 1
+        
+        # 转换为字典并验证
+        allocations = {modules[j]: int_alloc[j] for j in range(7)}
+        validate_allocation(layer_prune_amount, allocations, weight)
+        
+        res.extend(int_alloc.tolist())
 
+    # 最终验证
+    total_pruned = sum(res)
     print(res)
 
 
