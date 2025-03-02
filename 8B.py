@@ -47,8 +47,8 @@ class GradNormCalculator:
                 device_map["model.norm"] = "cuda:0"
             elif hasattr(model_temp.model, "final_layer_norm"):
                 device_map["model.final_layer_norm"] = "cuda:0"
-            if hasattr(model_temp.model, "lm_head"):
-                device_map["model.lm_head"] = "cuda:0"
+            # 注意：对于 Llama 模型，lm_head 通常在顶层，而不是 model 下
+            device_map["lm_head"] = "cuda:0"
             
             del model_temp  # 释放临时模型资源
         
@@ -72,7 +72,9 @@ class GradNormCalculator:
     def get_layers(self):
         if hasattr(self.model, "model") and hasattr(self.model.model, "layers"):
             return self.model.model.layers
-        elif hasattr(self.model, "model") and hasattr(self.model.model, "decoder") and hasattr(self.model.model.decoder, "layers"):
+        elif (hasattr(self.model, "model") 
+              and hasattr(self.model.model, "decoder") 
+              and hasattr(self.model.model.decoder, "layers")):
             return self.model.model.decoder.layers
         else:
             raise RuntimeError("Cannot locate model decoder layers.")
