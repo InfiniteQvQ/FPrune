@@ -751,17 +751,12 @@ def ww_sparsity_llama3_8b_split(args, model, device=torch.device("cuda:0"),
     layerwise_pruning_ratios_esd = layerwise_pruning_ratios_esd * scaler
     layerwise_pruning_ratios_esd = layerwise_pruning_ratios_esd.cpu().numpy().tolist()
     print("ESD-based ratios:", layerwise_pruning_ratios_esd)
-    importance = np.array([
-        12.546171, 10.435930, 8.065256, 6.466198, 5.112528, 4.219878, 3.586657, 3.161794,
-        2.979711, 2.802891, 2.699207, 2.560361, 2.295441, 2.088360, 1.845437, 1.697667,
-        1.518067, 1.401252, 1.329280, 1.233901, 1.145223, 1.061416, 0.994949, 0.928793,
-        0.857506, 0.733086, 0.569601, 0.463243, 0.415938, 0.276903, 0.135929, 0.099299
-    ])
+    importance = np.array([0.3262, 0.2539,0.1846, 0.1846,0.0899,0.0899,0.0899,0.0899,0.0899,0.0899,0.0899,0.0481,0.0481,
+                       0.0389,0.0389,0.0389,0.0317,0.0268,0.0268,0.0268,0.0227,0.0191,0.0191,0.0191,0.0191,
+                       0.0191,0.0191,0.0191,0.0164,0.0157,0.0154,0.0086])
     I_min = np.min(importance)
     I_max = np.max(importance)
-    s3 = 0.95
-    s4 = 1
-    norm_importance = ((importance - I_min) / (I_max - I_min) * (s4 - s3) + s4)
+    norm_importance = (importance - I_min) / (I_max - I_min)
     # 反转：重要性越高（数值大）希望剪枝比例越低
     pre_ratio = 1 - norm_importance
     avg_pre_ratio = np.mean(pre_ratio)
