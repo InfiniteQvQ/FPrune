@@ -571,25 +571,27 @@ def ww_sparsity_llama_7b_split(args, model, device=torch.device("cuda:0"),
         combined_ratios.append(combined)
     
     print("Combined layerwise pruning ratios:", combined_ratios)
+    
     res = []
 
     for i in range(32):
         #Q
-        res.append(combined_ratios[i*7] * 0.147493 * 7)
+        res.append(combined_ratios[i*7] * 0.148* 7 )
         #K
-        res.append(combined_ratios[i*7] * 0.144997 * 7)
+        res.append(combined_ratios[i*7]  *0.142392 * 7 )
         #V
-        res.append(combined_ratios[i*7] * 0.144217 * 7)
+        res.append(combined_ratios[i*7]  *0.142392  * 7 )
         #OUT
-        res.append(combined_ratios[i*7] *  0.142969 * 7)
-        #GATE
-        res.append(combined_ratios[i*7] * 0.139225  * 7)
+        res.append(combined_ratios[i*7]  * 0.142392 * 7  )
+        #GATE1
+        res.append(combined_ratios[i*7]  *0.141008  * 7   )
         #UP
-        res.append(combined_ratios[i*7] *  0.139927 * 7)
+        res.append(combined_ratios[i*7]  *0.141808 * 7  )
         #DOWN
-        res.append(combined_ratios[i*7] * 0.141175 * 7)
 
-    return combined_ratios
+        res.append(combined_ratios[i*7]  * 0.142008 * 7  )
+
+    return res
    
 def ww_sparsity_llama2_7b_split(args, model, device=torch.device("cuda:0"),
                                 s1=0.8, s2=1.2, ratios=None, prune_n=0, prune_m=0,
