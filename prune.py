@@ -752,65 +752,47 @@ def ww_sparsity_llama3_8b_split(args, model, device=torch.device("cuda:0"),
     layerwise_pruning_ratios_esd = layerwise_pruning_ratios_esd.cpu().numpy().tolist()
     print("ESD-based ratios:", layerwise_pruning_ratios_esd)
 
-    importance = np.array([16.8750,8.9688,8.9688,8.9688,8.9688,8.9688,8.9688,3.8203,3.8203,3.8203,3.8203,3.8203,3.8203,2.5078,2.5078,
-                       2.2188, 1.7943,1.7943,1.7943,1.5469,1.4453,1.2474,1.2474,1.2474, 0.7959,0.7959,0.7959,0.7959,0.5078,0.3516,0.1592,0.1187])
-    I_min = np.min(importance)
-    I_max = np.max(importance)
-    norm_importance = (importance - I_min) / (I_max - I_min)
-    # 反转：重要性越高（数值大）希望剪枝比例越低
-    pre_ratio = 1 - norm_importance
-    avg_pre_ratio = np.mean(pre_ratio)
-    print("Preliminary importance ratios:", pre_ratio)
-    print("Average of importance preliminary ratios:", avg_pre_ratio)
-    target_avg = args.sparsity_ratio  # 这里假设 args.sparsity_ratio 代表全局目标剪枝率（例如0.5）
-    scale_factor = target_avg / avg_pre_ratio
-    final_ratios_importance = pre_ratio * scale_factor
-    final_ratios_importance = np.clip(final_ratios_importance, 0.0, 0.99)
-    # 扩展：每个 transformer 层内有 layer_num_in_block 子层（例如7个）
-    importance_ratios_expanded = []
-    for i in final_ratios_importance:
-        for j in range(layer_num_in_block):
-            importance_ratios_expanded.append(i)
-    print("Importance-based expanded ratios:", importance_ratios_expanded)
-    
-    # ---------------------- 结合两种比例 ----------------------
-    # 这里采用加权平均方式，将 ESD-based 和 importance-based 比例融合
-    # weight_esd 为权重，默认为0.5，两者各占一半
-    if len(layerwise_pruning_ratios_esd) != len(importance_ratios_expanded):
-        raise ValueError("Length mismatch between ESD-based and importance-based ratios!")
-    
-    combined_ratios = []
-    for r_esd, r_imp in zip(layerwise_pruning_ratios_esd, importance_ratios_expanded):
-        combined = weight_esd * r_esd + (1 - weight_esd) * r_imp
-        combined = min(combined, 1.0)
-        combined_ratios.append(combined)
-    
-    print("Combined layerwise pruning ratios:", combined_ratios)
- 
-    return combined_ratios
     res = []
 
-    for i in range(32):
-        #Q
-        res.append(combined_ratios[i*7] * 0.145601 * 7)
-        #K
-        res.append(combined_ratios[i*7] * 0.146111 * 7)
-        #V
-        res.append(combined_ratios[i*7] * 0.151636 * 7)
-        #OUT
-        res.append(combined_ratios[i*7] *  0.148573 * 7)
-        #GATE
-        res.append(combined_ratios[i*7] * 0.132483  * 7)
-        #UP
-        res.append(combined_ratios[i*7] *  0.138161 * 7)
-        #DOWN
-        res.append(combined_ratios[i*7] *  0.137436 * 7)
+    layer_params_8B = {
+        "q_proj": 16777216,
+        "k_proj": 4194304,
+        "v_proj": 4194304,
+        "o_proj": 16777216,
+        "gate_proj": 58720256,
+        "up_proj": 58720256,
+        "down_proj": 58720256,
+    }
+    importance_scores_8B = {
+        "q_proj": 0.8,
+        "k_proj": 0.9,
+        "v_proj": 0.7,
+        "o_proj": 0.85,
+        "gate_proj": 0.5,
+        "up_proj": 0.4,
+        "down_proj": 0.3,
+    }
+    total_params = sum(layer_params_8B.values())
+    importance_values = np.array(list(importance_scores_8B.values()))
+    min_imp, max_imp = importance_values.min(), importance_values.max()
+    norm_importance = 1 - (importance_values - min_imp) / (max_imp - min_imp)
+    prune_weights = norm_importance / norm_importance.sum()
 
-    res = torch.tensor(res, dtype=torch.float32)
-    print("sum : ", res.sum() / (7*32))
-    res =  res.cpu().numpy().tolist()
-    print(res)
-    return res
+    
+    print(total_params)
+    pruning_results = {}
+    for i in range(32):
+        layer_prune_amount = int(total_params * layerwise_pruning_ratios_esd[i])
+        layer_prune_distribution = {
+            module: int(layer_prune_amount * prune_weights[idx]) for idx, module in enumerate(layer_params_8B.keys())
+        }
+        pruning_results[f"Layer {i+1}"] = layer_prune_distribution
+    
+    for layer, params in pruning_results.items():
+        print(f"{layer}:")
+        for module, prune_amount in params.items():
+            print(f"  {module}: Prune {prune_amount} parameters")
+        print()
 
 def ww_sparsity_llama3_8b(args, model, device=torch.device("cuda:0"),
                          s1=0.8, s2=1.2, ratios=None, prune_n=0, prune_m=0,
