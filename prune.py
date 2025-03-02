@@ -754,96 +754,31 @@ def ww_sparsity_llama3_8b_split(args, model, device=torch.device("cuda:0"),
 
     res = []
 
-    layer_params_8B = {
-        "q_proj": 16777216,
-        "k_proj": 4194304,
-        "v_proj": 4194304,
-        "o_proj": 16777216,
-        "gate_proj": 58720256,
-        "up_proj": 58720256,
-        "down_proj": 58720256,
-    }
-    importance_scores_8B = {
-        "q_proj": 0.8,
-        "k_proj": 0.9,
-        "v_proj": 0.7,
-        "o_proj": 0.85,
-        "gate_proj": 0.5,
-        "up_proj": 0.4,
-        "down_proj": 0.3,
-    }
-    total_params = sum(layer_params_8B.values())
-    importance_values = np.array(list(importance_scores_8B.values()))
-    min_imp, max_imp = importance_values.min(), importance_values.max()
-  
-    alpha = 0.3
-    scaled_imp = min_imp + (max_imp - min_imp) * alpha
-    norm_importance = (max_imp - importance_values) / (max_imp - min_imp)  # 原始差异比例
-    norm_importance = 1 - alpha * norm_importance
-    prune_weights = norm_importance / norm_importance.sum()
-
-    print(total_params)
-    def allocate_integer(float_alloc, total):
-        """整数分配修正函数"""
-        # 第一阶段：取整数部分
-        integers = np.floor(float_alloc).astype(int)
-        remainders = float_alloc - integers
-        current_total = integers.sum()
-        
-        # 第二阶段：分配余数
-        remainder = total - current_total
-        if remainder > 0:
-            # 按小数部分降序分配余数
-            indices = np.argsort(-remainders)[:remainder]
-            integers[indices] += 1
-        
-        return integers
-    pruning_results = {}
+    weight = np.array([16777216,4194304,4194304, 16777216,  58720256, 58720256, 58720256])
+ 
+    
+    total_params = np.sum(weight)
+   
     for i in range(32):
-        # 修正索引问题：应直接使用i而不是i*7
-        layer_prune_amount = int(total_params * layerwise_pruning_ratios_esd[i*7])
-        
-        # 生成浮点分配方案
-        module_names = list(layer_params_8B.keys())
-        float_alloc = layer_prune_amount * prune_weights
-        
-        # 整数分配修正
-        int_alloc = allocate_integer(float_alloc, layer_prune_amount)
-        
-        # 参数保护机制
-        final_alloc = {}
-        remaining = layer_prune_amount
-        for idx, module in enumerate(module_names):
-            max_prune = layer_params_8B[module]
-            alloc = min(int_alloc[idx], max_prune)
-            final_alloc[module] = alloc
-            remaining -= alloc
-        
-        # 二次分配剩余量（当有模块达到上限时）
-        if remaining > 0:
-            for idx in np.argsort(-prune_weights):
-                module = module_names[idx]
-                current = final_alloc[module]
-                max_add = layer_params_8B[module] - current
-                add = min(remaining, max_add)
-                final_alloc[module] += add
-                remaining -= add
-                if remaining == 0:
-                    break
-        
-        pruning_results[f"Layer {i+1}"] = final_alloc
+     
+        #Q
+        res.append(layerwise_pruning_ratios_esd[i*7] * weight[0] / total_params *  0.142 * 7)
+        #K
+        res.append(layerwise_pruning_ratios_esd[i*7] * weight[1] / total_params * 0.145 * 7)
+        #V
+        res.append(layerwise_pruning_ratios_esd[i*7] * weight[2] / total_params * 0.145 * 7)
+        #OUT
+        res.append(layerwise_pruning_ratios_esd[i*7] * weight[3] / total_params *  0.142 * 7)
+        #GATE
+        res.append(layerwise_pruning_ratios_esd[i*7] * weight[4] / total_params * 0.142  * 7)
+        #UP
+        res.append(layerwise_pruning_ratios_esd[i*7] * weight[5] / total_params * 0.142 * 7)
+        #DOWN
+        res.append(layerwise_pruning_ratios_esd[i*7] * weight[6] / total_params *0.142 * 7)
+       
 
-    # 验证输出
-    total_pruned = 0
-    for layer, alloc in pruning_results.items():
-        layer_total = sum(alloc.values())
-        total_pruned += layer_total
-        print(f"{layer} 总剪枝量: {layer_total}")
-        for module, amount in alloc.items():
-            print(f"  {module}: {amount}/{layer_params_8B[module]} ({(amount/layer_params_8B[module]):.1%})")
-        print()
-
-    print(f"累计总剪枝参数: {total_pruned}")
+    print(res)
+    
 
 def ww_sparsity_llama3_8b(args, model, device=torch.device("cuda:0"),
                          s1=0.8, s2=1.2, ratios=None, prune_n=0, prune_m=0,
