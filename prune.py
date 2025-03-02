@@ -775,24 +775,75 @@ def ww_sparsity_llama3_8b_split(args, model, device=torch.device("cuda:0"),
     total_params = sum(layer_params_8B.values())
     importance_values = np.array(list(importance_scores_8B.values()))
     min_imp, max_imp = importance_values.min(), importance_values.max()
-    norm_importance = 1 - (importance_values - min_imp) / (max_imp - min_imp)
+  
+    alpha = 0.3
+    scaled_imp = min_imp + (max_imp - min_imp) * alpha
+    norm_importance = (max_imp - importance_values) / (max_imp - min_imp)  # 原始差异比例
+    norm_importance = 1 - alpha * norm_importance
     prune_weights = norm_importance / norm_importance.sum()
 
-    
     print(total_params)
+    def allocate_integer(float_alloc, total):
+        """整数分配修正函数"""
+        # 第一阶段：取整数部分
+        integers = np.floor(float_alloc).astype(int)
+        remainders = float_alloc - integers
+        current_total = integers.sum()
+        
+        # 第二阶段：分配余数
+        remainder = total - current_total
+        if remainder > 0:
+            # 按小数部分降序分配余数
+            indices = np.argsort(-remainders)[:remainder]
+            integers[indices] += 1
+        
+        return integers
     pruning_results = {}
     for i in range(32):
-        layer_prune_amount = int(total_params * layerwise_pruning_ratios_esd[i])
-        layer_prune_distribution = {
-            module: int(layer_prune_amount * prune_weights[idx]) for idx, module in enumerate(layer_params_8B.keys())
-        }
-        pruning_results[f"Layer {i+1}"] = layer_prune_distribution
-    
-    for layer, params in pruning_results.items():
-        print(f"{layer}:")
-        for module, prune_amount in params.items():
-            print(f"  {module}: Prune {prune_amount} parameters")
+        # 修正索引问题：应直接使用i而不是i*7
+        layer_prune_amount = int(total_params * layerwise_pruning_ratios_esd[i*7])
+        
+        # 生成浮点分配方案
+        module_names = list(layer_params_8B.keys())
+        float_alloc = layer_prune_amount * prune_weights
+        
+        # 整数分配修正
+        int_alloc = allocate_integer(float_alloc, layer_prune_amount)
+        
+        # 参数保护机制
+        final_alloc = {}
+        remaining = layer_prune_amount
+        for idx, module in enumerate(module_names):
+            max_prune = layer_params_8B[module]
+            alloc = min(int_alloc[idx], max_prune)
+            final_alloc[module] = alloc
+            remaining -= alloc
+        
+        # 二次分配剩余量（当有模块达到上限时）
+        if remaining > 0:
+            for idx in np.argsort(-prune_weights):
+                module = module_names[idx]
+                current = final_alloc[module]
+                max_add = layer_params_8B[module] - current
+                add = min(remaining, max_add)
+                final_alloc[module] += add
+                remaining -= add
+                if remaining == 0:
+                    break
+        
+        pruning_results[f"Layer {i+1}"] = final_alloc
+
+    # 验证输出
+    total_pruned = 0
+    for layer, alloc in pruning_results.items():
+        layer_total = sum(alloc.values())
+        total_pruned += layer_total
+        print(f"{layer} 总剪枝量: {layer_total}")
+        for module, amount in alloc.items():
+            print(f"  {module}: {amount}/{layer_params_8B[module]} ({(amount/layer_params_8B[module]):.1%})")
         print()
+
+    print(f"累计总剪枝参数: {total_pruned}")
 
 def ww_sparsity_llama3_8b(args, model, device=torch.device("cuda:0"),
                          s1=0.8, s2=1.2, ratios=None, prune_n=0, prune_m=0,
