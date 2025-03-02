@@ -751,40 +751,27 @@ def ww_sparsity_llama3_8b_split(args, model, device=torch.device("cuda:0"),
     layerwise_pruning_ratios_esd = layerwise_pruning_ratios_esd * scaler
     layerwise_pruning_ratios_esd = layerwise_pruning_ratios_esd.cpu().numpy().tolist()
     print("ESD-based ratios:", layerwise_pruning_ratios_esd)
-   
-    weight = np.array([16777216, 4194304, 4194304, 16777216, 58720256, 58720256, 58720256])
-    importance_weights = np.array([0.0921, 0.3684, 0.3684, 0.0921,  0.0263,  0.0263,  0.0263])
+    res = []
 
-    total_params_per_module = weight  # 每个模块的总参数量
-    total_params = weight.sum()  # 所有模块参数总和
-
-    prune_ratios_flat = []  # 存储 7×32 的 1D 剪枝百分比列表
-
-    # 遍历 32 层
     for i in range(32):
-        # 获取当前层的剪枝比例（假设 `layerwise_pruning_ratios_esd` 提供每层的剪枝比例）
-        prune_ratio = layerwise_pruning_ratios_esd[i*7]  
-        
-        # 计算当前层总剪枝量
-        layer_prune_amount = int(total_params * prune_ratio)
-        
-        # 计算每个模块的剪枝量
-        float_alloc = layer_prune_amount * importance_weights
-        int_alloc = np.floor(float_alloc).astype(int)
-        
-        # 处理余数
-        remainder = layer_prune_amount - int_alloc.sum()
-        decimals = float_alloc - int_alloc
-        for idx in np.argsort(-decimals)[:remainder]:
-            int_alloc[idx] += 1
+        #Q
+        res.append(layerwise_pruning_ratios_esd[i*7] * 0.144857143 * 7)
+        #K
+        res.append(layerwise_pruning_ratios_esd[i*7] * 0.142857143 * 7)
+        #V
+        res.append(layerwise_pruning_ratios_esd[i*7] * 0.142857143 * 7)
+        #OUT
+        res.append(layerwise_pruning_ratios_esd[i*7] * 0.140857143 * 7)
+        #GATE
+        res.append(layerwise_pruning_ratios_esd[i*7] * 0.144857143  * 7)
+        #UP
+        res.append(layerwise_pruning_ratios_esd[i*7] * 0.141857143 * 7)
+        #DOWN
 
-        # 计算该层每个模块的剪枝百分比，并存入 1D 列表
-        layer_prune_percentage = int_alloc / total_params_per_module  # 归一化为当前模块的剪枝比例
-        
-        prune_ratios_flat.extend(layer_prune_percentage.tolist())  # 转成列表追加
-
-    # 输出最终的 7×32 1D 剪枝比例
-    print(prune_ratios_flat)
+        res.append(layerwise_pruning_ratios_esd[i*7] * 0.141857143 * 7)
+    print(res)
+    return res
+    
 
 def ww_sparsity_llama3_8b(args, model, device=torch.device("cuda:0"),
                          s1=0.8, s2=1.2, ratios=None, prune_n=0, prune_m=0,
