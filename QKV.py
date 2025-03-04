@@ -44,5 +44,5 @@ sorted_attn = sorted(attn_scores.items(), key=lambda x: -x[1])
 
 # **输出 Top 10 重要的层**
 print("Top 10 Most Important Layers by Attention Score:")
-for layer, score in sorted_attn[]:
+for layer, score in sorted_attn[:]:
     print(f"{layer}: {score}")
