@@ -2,7 +2,7 @@ import torch
 import numpy as np
 import seaborn as sns
 import matplotlib.pyplot as plt
-from transformers import AutoModelForCausalLM, AutoConfig, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoConfig, AutoTokenizer, LlamaTokenizer
 from typing import Dict, List
 import argparse
 from sklearn.cluster import KMeans
@@ -109,7 +109,7 @@ def normalize_fisher_scores(fisher_scores: dict):
 # 5) SGLPPruner
 # --------------------------------------------------------------
 class SGLPPruner:
-    def __init__(self, model_name: str, cache_dir: str="llm_weights"):
+    def __init__(self, model_name: str, cache_dir: str="/root/autodl-tmp/llm_weights"):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         print("[Init] Loading model:", model_name)
@@ -124,7 +124,8 @@ class SGLPPruner:
         
         # tokenizer 用于获取真实文本的 input_ids
         print("[Init] Loading tokenizer:", model_name)
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        tokenizer_name = "HuggingFaceM4/llama-7b-tokenizer"
+        self.tokenizer = LlamaTokenizer.from_pretrained(tokenizer_name)
 
         # 重点：如果没有 pad_token，就把它设成 eos_token
         if self.tokenizer.pad_token is None:
@@ -323,9 +324,9 @@ class SGLPPruner:
 
         return segment_scores
 
-    def compute_segment_scores2(self, segments: Dict[int, List[int]], num_samples: int=8, seq_len: int=128):
+    def compute_segment_scores2(self, segments: Dict[int, List[int]], num_samples: int = 8, seq_len: int = 128):
         """
-        计算 GradNorm-Hill（归一化的梯度重要性）作为每个 segment 的重要性。
+        计算 GradNorm 作为每个 segment 的重要性。
         """
         self.gradients.clear()
         layers = self.get_layers()
@@ -339,7 +340,7 @@ class SGLPPruner:
 
         self.model.train()
 
-        # 同样优先用真实文本
+        # 尽量使用真实文本作为输入
         if self.tokenizer is not None:
             input_ids = get_real_input(self.device, self.tokenizer, num_samples=num_samples, seq_len=seq_len)
         else:
@@ -359,8 +360,7 @@ class SGLPPruner:
             h.remove()
         torch.cuda.empty_cache()
 
-        segment_gradnorms = {}  # 存储每个 Segment 的 GradNorm
-        gradnorm_values = []  # 存储所有 GradNorm 以计算 G_max 和 G_bulk
+        segment_gradnorms = {}  # 存储每个 segment 的 GradNorm
 
         for seg_id, layer_idxs in segments.items():
             g_norm_sum = 0.0
@@ -370,25 +370,13 @@ class SGLPPruner:
                     gn = torch.norm(self.gradients[lid]).item()
                     g_norm_sum += gn
                     valid_count += 1
-                    gradnorm_values.append(gn)  # 记录所有 GradNorm
-
             if valid_count > 0:
                 segment_gradnorms[seg_id] = g_norm_sum / valid_count
             else:
                 segment_gradnorms[seg_id] = 0.0
 
-        # 计算 G_max 和 G_bulk
-        if len(gradnorm_values) > 0:
-            G_max = max(gradnorm_values)
-            G_bulk = sum(gradnorm_values) / len(gradnorm_values)  # 计算均值
-        else:
-            G_max = 1.0  # 避免除零
-            G_bulk = 1.0
-
-        # 计算 GradNorm-Hill
-        segment_scores = {seg_id: segment_gradnorms[seg_id] / (G_bulk + 1e-8) for seg_id in segment_gradnorms}
-
-        return segment_scores
+        # 直接返回每个 segment 的 GradNorm
+        return segment_gradnorms
 
 
     def prune_segments(self, segments: Dict[int, List[int]],
@@ -480,7 +468,7 @@ if __name__ == "__main__":
         print(f"Segment {sid}: importance={score:.4f}")
 
     print(f"[Main] Pruning ratio = {args.prune_ratio}")
-    pruner.prune_segments(segments, seg_scores, args.prune_ratio)
+    #pruner.prune_segments(segments, seg_scores, args.prune_ratio)
 
     # 可选: 保存模型
     # pruner.model.save_pretrained("pruned_model")
