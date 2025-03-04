@@ -73,14 +73,35 @@ sorted_grad_activations = sorted(
     key=lambda x: -x[1]
 )
 
+import numpy as np
+
+# 🚀 `sorted_grad_activations` 可能是乱序的，我们重新整理
+sorted_grad_activations = sorted(
+    [(int(name.split("_")[-1]), data["contribution"]) for name, data in grad_activation_scores.items() if "contribution" in data],
+    key=lambda x: x[0]  # 按层索引排序
+)
+
+# ✅ 提取按层排序的贡献度值
+layerwise_importance_values = np.array([value for _, value in sorted_grad_activations])
+
 # ✅ 打印结果
-print("\n🚀 **梯度 × 激活值 贡献度（按重要性排序）** 🚀\n")
-for layer, score in sorted_grad_activations:
-    print(f"{layer}: Contribution={score:.6f}")
+print("\n🚀 **按层索引排序后的梯度 × 激活值贡献度** 🚀\n")
+for layer_idx, score in sorted_grad_activations:
+    print(f"Layer {layer_idx}: Contribution={score:.6f}")
 
-sorted_layer_importance = sorted(sorted_grad_activations.items(), key=lambda x: int(x[0].split("_")[-1]))
+print("\n🚀 按层排序后的贡献度数组:", layerwise_importance_values)
 
-# 转换为数组
-sorted_layer_importance_values = np.array([v for _, v in sorted_layer_importance])
+sorted_grad_activations = sorted(
+    [(int(name.split("_")[-1]), data["contribution"]) for name, data in grad_activation_scores.items() if "contribution" in data],
+    key=lambda x: x[0]  # 按层索引排序
+)
 
-print("🚀 按层排序后的梯度 × 激活值贡献度:", sorted_layer_importance_values)
+# ✅ 提取按层排序的贡献度值
+layerwise_importance_values = np.array([value for _, value in sorted_grad_activations])
+
+# ✅ 打印结果
+print("\n🚀 **按层索引排序后的梯度 × 激活值贡献度** 🚀\n")
+for layer_idx, score in sorted_grad_activations:
+    print(f"Layer {layer_idx}: Contribution={score:.6f}")
+
+print("\n🚀 按层排序后的贡献度数组:", layerwise_importance_values)
