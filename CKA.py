@@ -1,7 +1,7 @@
 import torch
 import numpy as np
-import seaborn as sns
 import matplotlib.pyplot as plt
+import seaborn as sns
 from transformers import AutoModelForCausalLM, AutoConfig, AutoTokenizer, LlamaTokenizer
 from typing import Dict, List
 import argparse
@@ -44,6 +44,7 @@ def get_real_input(device, tokenizer, num_samples=8, seq_len=128):
 def auto_select_k(cka_mat: np.ndarray, max_k: int = 15):
     """
     自动计算最优分割数 k, 采用 KMeans 进行聚类。
+    根据 CKA 矩阵，先对每层相似度求和，再做聚类。
     """
     num_layers = cka_mat.shape[0]
     A = np.sum(cka_mat, axis=1).reshape(-1, 1)  # [num_layers, 1]
@@ -67,6 +68,10 @@ def auto_select_k(cka_mat: np.ndarray, max_k: int = 15):
 # 3) CKA 计算
 # --------------------------------------------------------------
 def centered_cka(X: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
+    """
+    计算 Centered Kernel Alignment (CKA)
+    X, Y: [N, d]
+    """
     K = X @ X.T
     L = Y @ Y.T
 
@@ -91,6 +96,7 @@ def centered_cka(X: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
 def normalize_fisher_scores(fisher_scores: dict):
     """
     如果你在某处使用 Fisher 信息，可在此对其做 min-max 归一化 (可选)。
+    这里只是一个示例函数，当前未被调用。
     """
     if not fisher_scores:
         return {}
@@ -121,21 +127,23 @@ class SGLPPruner:
             device_map="auto"
         )
         
-        
-        # tokenizer 用于获取真实文本的 input_ids
         print("[Init] Loading tokenizer:", model_name)
+        # 你可以根据实际情况换成适合自己模型的 tokenizer
         tokenizer_name = "HuggingFaceM4/llama-7b-tokenizer"
         self.tokenizer = LlamaTokenizer.from_pretrained(tokenizer_name)
 
-        # 重点：如果没有 pad_token，就把它设成 eos_token
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
+
         self.config = self.model.config
 
         self.activations = {}
         self.gradients = {}
 
     def get_layers(self):
+        """
+        根据不同模型结构，定位到 model.layers (或 model.decoder.layers)
+        """
         if hasattr(self.model, "model") and hasattr(self.model.model, "layers"):
             return self.model.model.layers
         elif (hasattr(self.model, "model") 
@@ -145,11 +153,15 @@ class SGLPPruner:
         else:
             raise RuntimeError("无法定位到模型 decoder layers, 请根据实际结构修改 get_layers()")
 
+    # ----------------- Forward Hook 用于获取激活 ----------------- #
     def _hook_activations(self, module, inp, out, layer_idx: int):
         act = out[0].detach().cpu()
         self.activations[layer_idx] = act
 
     def compute_cka_matrix(self, num_samples=8, seq_len=512, sample_size=128):
+        """
+        获取中间激活后，计算各层之间的 CKA 相似度矩阵
+        """
         self.activations.clear()
         layers = self.get_layers()
         num_layers = len(layers)
@@ -164,7 +176,7 @@ class SGLPPruner:
         
         self.model.eval()
 
-        # 使用真实文本或作为退路：如果 tokenizer 为空，就用随机输入
+        # 使用真实文本 或 随机输入
         if self.tokenizer is not None:
             input_ids = get_real_input(self.device, self.tokenizer, num_samples=num_samples, seq_len=seq_len)
         else:
@@ -211,7 +223,13 @@ class SGLPPruner:
         
         return cka_mat
 
+    # ----------------- Fisher Partition ----------------- #
     def fisher_segmentation(self, similarity_matrix: np.ndarray, k: int) -> Dict[int, List[int]]:
+        """
+        基于类似 "Fisher’s Optimal Partition" 的动态规划做分段
+        输入：相似度矩阵 similarity_matrix (L x L)，以及段数 k
+        输出：segments (seg_id -> [layer_idx, ...])
+        """
         L = similarity_matrix.shape[0]
         A = np.sum(similarity_matrix, axis=1)
 
@@ -265,29 +283,34 @@ class SGLPPruner:
 
         return segments
 
+    # ----------------- Backward Hook 获取梯度 ----------------- #
     def _hook_gradients(self, module, grad_in, grad_out, layer_idx: int):
+        """
+        这个函数在 backward 时被调用，grad_out[0] 就是对该层输出的梯度 (batch_size, seq_len, hidden_dim).
+        """
         g = grad_out[0].detach().cpu()
         self.gradients[layer_idx] = g
 
-    def compute_segment_scores(self, segments: Dict[int, List[int]],
-                               num_samples: int=8, seq_len: int=128):
+    # ----------------- 计算每个 segment 的 GradNorm ----------------- #
+    def compute_segment_scores2(self, segments: Dict[int, List[int]], 
+                                num_samples: int = 8, seq_len: int = 128):
         """
-        基于 GradNorm 计算每个 segment 的重要性。
-        用真实文本 input_ids 而不是随机输入。
+        计算 GradNorm 作为每个 segment 的重要性 (去掉 GradNorm-Hill, 只返回原始的平均梯度范数).
         """
         self.gradients.clear()
         layers = self.get_layers()
 
+        # **使用 register_full_backward_hook 代替 register_backward_hook (需要 PyTorch≥1.10)**
         hooks = []
         for idx, layer in enumerate(layers):
-            h = layer.register_backward_hook(
+            h = layer.register_full_backward_hook(
                 lambda m, gi, go, idx=idx: self._hook_gradients(m, gi, go, idx)
             )
             hooks.append(h)
 
         self.model.train()
 
-        # 同样优先用真实文本
+        # 如果有 tokenizer，就用真实文本；否则用随机输入
         if self.tokenizer is not None:
             input_ids = get_real_input(self.device, self.tokenizer, num_samples=num_samples, seq_len=seq_len)
         else:
@@ -303,65 +326,13 @@ class SGLPPruner:
         loss = outputs.loss
         loss.backward()
 
+        # 移除所有钩子，清理缓存
         for h in hooks:
             h.remove()
         torch.cuda.empty_cache()
 
-        segment_scores = {}
-        for seg_id, layer_idxs in segments.items():
-            g_norm_sum = 0.0
-            valid_count = 0
-            for lid in layer_idxs:
-                if lid in self.gradients:
-                    gn = torch.norm(self.gradients[lid]).item()
-                    g_norm_sum += gn
-                    valid_count += 1
-
-            if valid_count > 0:
-                segment_scores[seg_id] = g_norm_sum / valid_count
-            else:
-                segment_scores[seg_id] = 0.0
-
-        return segment_scores
-
-    def compute_segment_scores2(self, segments: Dict[int, List[int]], num_samples: int = 8, seq_len: int = 128):
-        """
-        计算 GradNorm 作为每个 segment 的重要性。
-        """
-        self.gradients.clear()
-        layers = self.get_layers()
-
-        hooks = []
-        for idx, layer in enumerate(layers):
-            h = layer.register_backward_hook(
-                lambda m, gi, go, idx=idx: self._hook_gradients(m, gi, go, idx)
-            )
-            hooks.append(h)
-
-        self.model.train()
-
-        # 尽量使用真实文本作为输入
-        if self.tokenizer is not None:
-            input_ids = get_real_input(self.device, self.tokenizer, num_samples=num_samples, seq_len=seq_len)
-        else:
-            print("[Warning] No tokenizer available, fallback to random input.")
-            input_ids = torch.randint(
-                0, self.config.vocab_size,
-                (num_samples, seq_len),
-                device=self.device
-            )
-
-        labels = input_ids.clone()
-        outputs = self.model(input_ids, labels=labels)
-        loss = outputs.loss
-        loss.backward()
-
-        for h in hooks:
-            h.remove()
-        torch.cuda.empty_cache()
-
-        segment_gradnorms = {}  # 存储每个 segment 的 GradNorm
-
+        # 计算每个 segment 的平均梯度范数
+        segment_gradnorms = {}
         for seg_id, layer_idxs in segments.items():
             g_norm_sum = 0.0
             valid_count = 0
@@ -375,14 +346,15 @@ class SGLPPruner:
             else:
                 segment_gradnorms[seg_id] = 0.0
 
-        # 直接返回每个 segment 的 GradNorm
         return segment_gradnorms
 
-
+    # ----------------- 按照分段分数进行剪枝 ----------------- #
     def prune_segments(self, segments: Dict[int, List[int]],
                        seg_scores: Dict[int, float],
                        prune_ratio: float=0.3):
-        # 升序排序
+        """
+        根据 seg_scores (GradNorm 越小越不重要)，剪掉前 prune_ratio 比例的 segment。
+        """
         sorted_segs = sorted(seg_scores.items(), key=lambda x: x[1])
         num_segs = len(sorted_segs)
         num_to_prune = int(num_segs * prune_ratio)
@@ -404,8 +376,8 @@ class SGLPPruner:
         print(f"[Prune] Segment-based prune done: pruned {num_to_prune} / {num_segs} segments")
         print(f"[Prune] Original layers = {len(original_layers)}, remain = {len(new_modulelist)}")
 
+    # ----------------- 可视化 ----------------- #
     def visualize(self, cka_mat: np.ndarray, segments: Dict[int, List[int]]):
-        import math
         plt.figure(figsize=(12,6))
 
         plt.subplot(1,2,1)
@@ -468,7 +440,8 @@ if __name__ == "__main__":
         print(f"Segment {sid}: importance={score:.4f}")
 
     print(f"[Main] Pruning ratio = {args.prune_ratio}")
-    #pruner.prune_segments(segments, seg_scores, args.prune_ratio)
+    # 如果要执行真实剪枝，取消下行注释
+    # pruner.prune_segments(segments, seg_scores, args.prune_ratio)
 
-    # 可选: 保存模型
+    # 可选: 保存剪枝后的模型
     # pruner.model.save_pretrained("pruned_model")
