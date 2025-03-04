@@ -552,51 +552,21 @@ def ww_sparsity_llama_7b_split(args, model, device=torch.device("cuda:0"),
         12: [30],
         13: [31]
     }
-    segment_importance = np.array([
-        37.2500, 10.2500, 0.8398, 0.5781,
-        0.2174, 0.1138, 0.1027, 0.0973,
-        0.0944, 0.0933, 0.0933, 0.0737,
-        0.0708, 0.0199
-    ])
-    importance = []
-    for seg_id in sorted(segments.keys()):
-        count = len(segments[seg_id])
-        value = segment_importance[seg_id]
-        # 将该 segment 的重要性值复制 count 次
-        importance.extend([value] * count)
-    I_min = np.min(importance)
-    I_max = np.max(importance)
-    norm_importance = ((importance - I_min) / (I_max - I_min)) 
-    # 反转：重要性越高（数值大）希望剪枝比例越低
-    pre_ratio = 1 - norm_importance
-    avg_pre_ratio = np.mean(pre_ratio)
-    print("Preliminary importance ratios:", pre_ratio)
-    print("Average of importance preliminary ratios:", avg_pre_ratio)
-    target_avg = args.sparsity_ratio  # 这里假设 args.sparsity_ratio 代表全局目标剪枝率（例如0.5）
-    scale_factor = target_avg / avg_pre_ratio
-    final_ratios_importance = pre_ratio * scale_factor
-    final_ratios_importance = np.clip(final_ratios_importance, 0.0, 0.99)
-    # 扩展：每个 transformer 层内有 layer_num_in_block 子层（例如7个）
-    importance_ratios_expanded = []
-    for i in final_ratios_importance:
-        for j in range(layer_num_in_block):
-            importance_ratios_expanded.append(i)
-    print("Importance-based expanded ratios:", importance_ratios_expanded)
-    
-    # ---------------------- 结合两种比例 ----------------------
-    # 这里采用加权平均方式，将 ESD-based 和 importance-based 比例融合
-    # weight_esd 为权重，默认为0.5，两者各占一半
-    if len(layerwise_pruning_ratios_esd) != len(importance_ratios_expanded):
-        raise ValueError("Length mismatch between ESD-based and importance-based ratios!")
-    
-    combined_ratios = []
-    for r_esd, r_imp in zip(layerwise_pruning_ratios_esd, importance_ratios_expanded):
-        combined = weight_esd * r_esd + (1 - weight_esd) * r_imp
-        combined = min(combined, 1.0)
-        combined_ratios.append(combined)
-    
-    print("Combined layerwise pruning ratios:", combined_ratios)
-    return combined_ratios
+   
+    importance =  np.array([ 2.08616257e-06,  2.92062759e-06,  7.15255737e-07,  5.96046448e-07,
+        3.57627869e-07, -5.96046448e-07, -5.36441803e-07, -6.55651093e-07,
+        3.57627869e-07, -2.98023224e-07, -1.19209290e-06, -8.94069672e-07,
+        -4.17232513e-07, -0.00000000e+00,  2.38418579e-07, -1.19209290e-07,
+        7.74860382e-07,  1.37090683e-06,  7.74860382e-07,  1.01327896e-06,
+        1.84774399e-06,  1.60932541e-06,  2.80141830e-06,  2.86102295e-06,
+        3.21865082e-06,  3.63588333e-06,  4.41074371e-06 , 5.00679016e-06,
+        5.12599945e-06,  5.48362732e-06,  5.36441803e-07, -0.00000000e+00])
+    importance_scores = importance_scores - importance_scores.min()  # 使最小值为 0
+    importance_scores = importance_scores / (importance_scores.max() + 1e-9)
+
+    final_pruning_ratios = 0.8 * layerwise_pruning_ratios_esd + (1 - 0.8) * (1 - importance_scores)
+    print("🔥 最终剪枝比例:", final_pruning_ratios)
+    return final_pruning_ratios
     
    
 def ww_sparsity_llama2_7b_split(args, model, device=torch.device("cuda:0"),
