@@ -552,7 +552,8 @@ def ww_sparsity_llama_7b_split(args, model, device=torch.device("cuda:0"),
         12: [30],
         13: [31]
     }
-   
+    layerwise_pruning_ratios_esd = np.array(layerwise_pruning_ratios_esd, dtype=np.float32)
+
     importance_scores =  np.array([ 2.08616257e-06,  2.92062759e-06,  7.15255737e-07,  5.96046448e-07,
         3.57627869e-07, -5.96046448e-07, -5.36441803e-07, -6.55651093e-07,
         3.57627869e-07, -2.98023224e-07, -1.19209290e-06, -8.94069672e-07,
@@ -563,8 +564,12 @@ def ww_sparsity_llama_7b_split(args, model, device=torch.device("cuda:0"),
         5.12599945e-06,  5.48362732e-06,  5.36441803e-07, -0.00000000e+00])
     importance_scores = importance_scores - importance_scores.min()  # 使最小值为 0
     importance_scores = importance_scores / (importance_scores.max() + 1e-9)
+    target_sparsity = 0.7
+    current_mean_sparsity = np.mean(importance_scores)
+    scaler = target_sparsity / (current_mean_sparsity + 1e-9)
+    final_pruning_ratios *= scaler
 
-    final_pruning_ratios = 0.8 * layerwise_pruning_ratios_esd + (1 - 0.8) * (1 - importance_scores)
+    final_pruning_ratios = 0.8 * layerwise_pruning_ratios_esd + (1 - 0.8) * (1 - final_pruning_ratios)
     print("🔥 最终剪枝比例:", final_pruning_ratios)
     return final_pruning_ratios
     
