@@ -566,7 +566,9 @@ def ww_sparsity_llama_7b_split(args, model, device=torch.device("cuda:0"),
         importance.extend([value] * count)
     I_min = np.min(importance)
     I_max = np.max(importance)
-    norm_importance = (importance - I_min) / (I_max - I_min)
+    s2 = 1
+    s1 = 0.7
+    norm_importance = (((importance - I_min) / (I_max - I_min)) * (s2 - s1) + s1)
     # 反转：重要性越高（数值大）希望剪枝比例越低
     pre_ratio = 1 - norm_importance
     avg_pre_ratio = np.mean(pre_ratio)
