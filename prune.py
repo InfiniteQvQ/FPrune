@@ -570,6 +570,7 @@ def ww_sparsity_llama_7b_split(args, model, device=torch.device("cuda:0"),
     importance_scores *= scaler
     print(importance_scores)
     print("mean: ", np.mean(importance_scores) )
+    print("esd mean: ", np.mean(layerwise_pruning_ratios_esd))
     res = []
     for i in range(32):
         for j in range(7):
@@ -577,6 +578,7 @@ def ww_sparsity_llama_7b_split(args, model, device=torch.device("cuda:0"),
     res = np.array(res)
     final_pruning_ratios = 0.8 * layerwise_pruning_ratios_esd + (1 - 0.8) * (res)
     print("🔥 最终剪枝比例:", final_pruning_ratios)
+    print("all mean: ", final_pruning_ratios)
     return final_pruning_ratios
     
    
