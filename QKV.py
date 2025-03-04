@@ -18,9 +18,13 @@ attn_scores = {}
 def get_attention_scores_hook(layer_id):
     def hook(module, input, output):
         if isinstance(output, tuple) and len(output) > 1:
-            attn_weights = output[1]  # 检查 `attn_probs`
+            attn_weights = output[1]  # 取 attn_probs
             if attn_weights is not None:
-                attn_scores[f"layer_{layer_id}"] = attn_weights.mean(dim=[0, 1, 2]).item()
+                print(f"Layer {layer_id} Attention Shape:", attn_weights.shape)  # 🔍 Debug Shape
+                mean_score = attn_weights.mean(dim=[0, 1, 2])  # 先对 batch, head, seq 取均值
+                if mean_score.numel() > 1:  # 如果仍然是张量，取均值
+                    mean_score = mean_score.mean()
+                attn_scores[f"layer_{layer_id}"] = mean_score.item()
     return hook
 
 # **注册 Hook**
@@ -33,9 +37,9 @@ for layer_id, layer in enumerate(model.model.layers):
 text = "The quick brown fox jumps over the lazy dog."
 inputs = tokenizer(text, return_tensors="pt").to("cuda")
 
-# **执行 Forward Pass，确保返回注意力权重**
+# **执行 Forward Pass**
 with torch.no_grad():
-    model(**inputs, output_attentions=True)  # 🔹 关键修正：确保输出 attn_probs
+    model(**inputs, output_attentions=True)  # 🔹 关键修正：确保返回 attn_probs
 
 # **移除 Hook**
 for hook in hooks:
