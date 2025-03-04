@@ -1,7 +1,7 @@
 import torch
 from transformers import AutoModelForCausalLM, LlamaTokenizer
 
-# **加载 LLaMA 7B 模型**
+# 🔹 加载 LLaMA-7B 模型
 cache_dir = "/root/autodl-tmp/llm_weights"
 model = AutoModelForCausalLM.from_pretrained(
     "pinkmanlove/llama-7b-hf",
@@ -9,44 +9,55 @@ model = AutoModelForCausalLM.from_pretrained(
     device_map="auto",
     torch_dtype=torch.float16
 )
-tokenizer_name = "HuggingFaceM4/llama-7b-tokenizer"
-tokenizer = LlamaTokenizer.from_pretrained(tokenizer_name)
+tokenizer = LlamaTokenizer.from_pretrained("HuggingFaceM4/llama-7b-tokenizer")
 
-# **存储注意力分数**
-attn_scores = {}
+# 🔹 计算梯度 × 激活值
+grad_activation_scores = {}
 
-def get_attention_scores_hook(layer_id):
-    def hook(module, input, output):
-        if isinstance(output, tuple) and len(output) > 1:
-            attn_weights = output[1]  # 取 attn_probs
-            if attn_weights is not None:
-                print(f"Layer {layer_id} Attention Shape:", attn_weights.shape)  # 🔍 Debug Shape
-                mean_score = attn_weights.mean(dim=[0, 1, 2])  # 先对 batch, head, seq 取均值
-                if mean_score.numel() > 1:  # 如果仍然是张量，取均值
-                    mean_score = mean_score.mean()
-                attn_scores[f"layer_{layer_id}"] = mean_score.item()
-    return hook
+def forward_hook(module, input, output):
+    """ 存储前向传播的激活值 """
+    layer_name = module._get_name()
+    grad_activation_scores[layer_name] = {"activation": output.detach()}
 
-# **注册 Hook**
+def backward_hook(module, grad_input, grad_output):
+    """ 计算梯度 × 激活值 """
+    layer_name = module._get_name()
+    activation = grad_activation_scores[layer_name]["activation"]
+    gradient = grad_output[0].detach()
+    
+    # 计算每层的贡献度
+    contribution = (gradient * activation).mean().item()
+    grad_activation_scores[layer_name]["contribution"] = contribution
+
+# 🔹 绑定前向 & 反向传播 Hook
 hooks = []
 for layer_id, layer in enumerate(model.model.layers):
-    hook = layer.self_attn.register_forward_hook(get_attention_scores_hook(layer_id))
-    hooks.append(hook)
+    fwd_hook = layer.register_forward_hook(forward_hook)
+    bwd_hook = layer.register_full_backward_hook(backward_hook)
+    hooks.extend([fwd_hook, bwd_hook])
 
-# **测试输入**
-text = "The quick brown fox jumps over the lazy dog."
-inputs = tokenizer(text, return_tensors="pt").to("cuda")
+# 🔹 运行模型并计算梯度
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model.to(device)
+text = "Artificial Intelligence is transforming the world with LLaMA-7B."
+inputs = tokenizer(text, return_tensors="pt").to(device)
 
-# **执行 Forward Pass**
-with torch.no_grad():
-    model(**inputs, output_attentions=True)  # 🔹 关键修正：确保返回 attn_probs
+# 🔹 计算 Loss 并反向传播
+outputs = model(**inputs, labels=inputs["input_ids"])
+loss = outputs.loss
+loss.backward()
 
-# **移除 Hook**
+# 🔹 释放 Hooks
 for hook in hooks:
     hook.remove()
 
-# **排序并输出**
-sorted_attn = sorted(attn_scores.items(), key=lambda x: -x[1])
-print("Top 10 Most Important Layers by Attention Score:")
-for layer, score in sorted_attn[:]:
-    print(f"{layer}: {score}")
+# 🔹 提取并排序贡献度
+sorted_grad_activations = sorted(
+    [(name, data["contribution"]) for name, data in grad_activation_scores.items() if "contribution" in data],
+    key=lambda x: -x[1]
+)
+
+# 🔹 打印结果
+print("\n🚀 **梯度 × 激活值 贡献度（按重要性排序）** 🚀\n")
+for layer, score in sorted_grad_activations:
+    print(f"{layer}: Contribution={score:.6f}")
