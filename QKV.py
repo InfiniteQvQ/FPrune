@@ -1,9 +1,9 @@
 import torch
 from transformers import AutoModelForCausalLM, LlamaTokenizer
 
-# ✅ 自动多 GPU 映射
+# ✅ 自动适配多 GPU
 device_count = torch.cuda.device_count()
-device_map = {i: f"cuda:{i}" for i in range(device_count)}  
+device_map = {i: f"cuda:{i}" for i in range(device_count)}
 print(f"🚀 Using {device_count} GPUs: {device_map}")
 
 # ✅ 加载 LLaMA-7B
@@ -12,7 +12,7 @@ model = AutoModelForCausalLM.from_pretrained(
     "pinkmanlove/llama-7b-hf",
     cache_dir=cache_dir,
     torch_dtype=torch.float16,
-    device_map="auto",  # 🚀 让 Hugging Face 自动分配多个 GPU
+    device_map="auto",
 )
 
 tokenizer = LlamaTokenizer.from_pretrained("HuggingFaceM4/llama-7b-tokenizer")
@@ -20,50 +20,38 @@ tokenizer = LlamaTokenizer.from_pretrained("HuggingFaceM4/llama-7b-tokenizer")
 # ✅ 存储梯度 × 激活值
 grad_activation_scores = {}
 
-def forward_hook(module, input, output):
+def forward_hook(layer_idx):
     """存储前向传播的激活值"""
-    layer_name = module._get_name() + f"_{id(module)}"  # ✅ 确保每个 LlamaDecoderLayer 都有唯一名字
-    
-    # ✅ 兼容 tuple 输出
-    if isinstance(output, tuple):
-        hidden_states = output[0]
-    else:
-        hidden_states = output
+    def hook(module, input, output):
+        layer_name = f"LlamaDecoderLayer_{layer_idx}"  # ✅ 直接存层数索引
+        hidden_states = output[0] if isinstance(output, tuple) else output  # ✅ 兼容 tuple 输出
+        grad_activation_scores[layer_name] = {"activation": hidden_states.detach()}
+    return hook
 
-    # ✅ 确保存储在当前计算 GPU
-    grad_activation_scores[layer_name] = {"activation": hidden_states.detach().to(hidden_states.device)}
-
-def backward_hook(module, grad_input, grad_output):
+def backward_hook(layer_idx):
     """计算梯度 × 激活值"""
-    layer_name = module._get_name() + f"_{id(module)}"
+    def hook(module, grad_input, grad_output):
+        layer_name = f"LlamaDecoderLayer_{layer_idx}"
 
-    # ✅ 兼容 tuple 输出
-    if isinstance(grad_output, tuple):
-        gradient = grad_output[0].detach()
-    else:
-        gradient = grad_output.detach()
+        gradient = grad_output[0].detach() if isinstance(grad_output, tuple) else grad_output.detach()
+        activation = grad_activation_scores[layer_name]["activation"]
 
-    activation = grad_activation_scores[layer_name]["activation"]
+        # ✅ 确保梯度和激活值在同一设备
+        if gradient.device != activation.device:
+            activation = activation.to(gradient.device)
 
-    # ✅ 确保梯度和激活值在同一个 GPU
-    if gradient.device != activation.device:
-        activation = activation.to(gradient.device)
+        # 🚀 计算贡献度
+        contribution = (gradient * activation).mean().item()
+        grad_activation_scores[layer_name]["contribution"] = contribution
 
-    # 🚀 计算贡献度
-    contribution = (gradient * activation).mean().item()
+        print(f"✅ Processed {layer_name}: Contribution={contribution:.6f}")
+    return hook
 
-    # ✅ 确保存到 `cuda:0`
-    grad_activation_scores[layer_name]["contribution"] = torch.tensor(contribution, device="cuda:0")
-
-    print(f"✅ Processed {layer_name}: Contribution={contribution:.6f}")
-
-# ✅ 绑定 Hooks
+# ✅ 绑定 Hooks (修正作用范围)
 hooks = []
 for idx, layer in enumerate(model.model.layers):
-    layer_name = f"LlamaDecoderLayer_{idx}"
-    fwd_hook = layer.register_forward_hook(forward_hook)
-    bwd_hook = layer.register_full_backward_hook(backward_hook)  # ✅ `register_full_backward_hook`
-    hooks.extend([fwd_hook, bwd_hook])
+    hooks.append(layer.register_forward_hook(forward_hook(idx)))
+    hooks.append(layer.register_full_backward_hook(backward_hook(idx)))  # ✅ 兼容 `accelerate`
 
 # ✅ 运行模型
 text = "Artificial Intelligence is transforming the world with LLaMA-7B."
@@ -79,14 +67,9 @@ loss.backward()
 for hook in hooks:
     hook.remove()
 
-# ✅ 统一收集 `梯度 × 激活值` 数据到 `cuda:0`
-for layer_name, data in grad_activation_scores.items():
-    if "contribution" in data:
-        grad_activation_scores[layer_name]["contribution"] = data["contribution"].to("cuda:0")
-
 # ✅ 提取并排序贡献度
 sorted_grad_activations = sorted(
-    [(name, data["contribution"].item()) for name, data in grad_activation_scores.items() if "contribution" in data],
+    [(name, data["contribution"]) for name, data in grad_activation_scores.items() if "contribution" in data],
     key=lambda x: -x[1]
 )
 
