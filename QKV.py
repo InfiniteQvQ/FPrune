@@ -11,21 +11,34 @@ model = AutoModelForCausalLM.from_pretrained(
 )
 tokenizer = LlamaTokenizer.from_pretrained("HuggingFaceM4/llama-7b-tokenizer")
 
-# 🔹 计算梯度 × 激活值
+# 🔹 存储梯度 × 激活值
 grad_activation_scores = {}
 
 def forward_hook(module, input, output):
     """ 存储前向传播的激活值 """
     layer_name = module._get_name()
-    grad_activation_scores[layer_name] = {"activation": output.detach()}
+    
+    # 🔹 兼容 tuple 输出（通常 LlamaDecoderLayer 返回多个值）
+    if isinstance(output, tuple):
+        hidden_states = output[0]  # 取 hidden_states
+    else:
+        hidden_states = output
+
+    grad_activation_scores[layer_name] = {"activation": hidden_states.detach()}
 
 def backward_hook(module, grad_input, grad_output):
     """ 计算梯度 × 激活值 """
     layer_name = module._get_name()
-    activation = grad_activation_scores[layer_name]["activation"]
-    gradient = grad_output[0].detach()
     
-    # 计算每层的贡献度
+    # 🔹 兼容 tuple 的 grad_output
+    if isinstance(grad_output, tuple):
+        gradient = grad_output[0].detach()
+    else:
+        gradient = grad_output.detach()
+
+    activation = grad_activation_scores[layer_name]["activation"]
+    
+    # 计算贡献度
     contribution = (gradient * activation).mean().item()
     grad_activation_scores[layer_name]["contribution"] = contribution
 
