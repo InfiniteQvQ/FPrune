@@ -1,78 +1,48 @@
 import torch
 from transformers import AutoModelForCausalLM, LlamaTokenizer
-from torch.utils.data import DataLoader, Dataset
-import numpy as np
 
-# Load LLaMA 7B Model
+# **加载 LLaMA 7B 模型**
 cache_dir = "/root/autodl-tmp/llm_weights"
 model = AutoModelForCausalLM.from_pretrained(
     "pinkmanlove/llama-7b-hf",
     cache_dir=cache_dir,
-    device_map="auto",  # Automatically distribute across GPUs
+    device_map="auto",
     torch_dtype=torch.float16
 )
-
 tokenizer_name = "HuggingFaceM4/llama-7b-tokenizer"
 tokenizer = LlamaTokenizer.from_pretrained(tokenizer_name)
 
-# Sample Dataset (Replace with your own dataset)
-class TextDataset(Dataset):
-    def __init__(self, texts, tokenizer, max_length=128):
-        self.texts = texts
-        self.tokenizer = tokenizer
-        self.max_length = max_length
-    
-    def __len__(self):
-        return len(self.texts)
-    
-    def __getitem__(self, idx):
-        encoding = self.tokenizer(self.texts[idx], max_length=self.max_length, padding="max_length", truncation=True, return_tensors="pt")
-        return encoding.input_ids.squeeze(0), encoding.attention_mask.squeeze(0)
+# **创建 Hook 存储注意力权重**
+attn_scores = {}
 
-# Example sentences (Replace with real dataset)
-sentences = ["The quick brown fox jumps over the lazy dog.", "Artificial intelligence is revolutionizing the world."]
-dataset = TextDataset(sentences, tokenizer)
-dataloader = DataLoader(dataset, batch_size=1, shuffle=True)
+def get_attention_scores_hook(layer_id):
+    def hook(module, input, output):
+        attn_weights = output[1]  # `attn_probs` 是输出中的第二个
+        attn_scores[f"layer_{layer_id}"] = attn_weights.mean(dim=[0, 1, 2]).item()
+    return hook
 
-# Compute Fisher Information
-def compute_fisher_information(model, dataloader, num_batches=10):
-    fisher_info = {}
-    model.eval()
-    
-    for batch_idx, (input_ids, attention_mask) in enumerate(dataloader):
-        if batch_idx >= num_batches:
-            break
-        
-        input_device = next(model.parameters()).device
-        input_ids, attention_mask = input_ids.to(input_device), attention_mask.to(input_device)
+# **给每一层 Self-Attention 机制注册 Hook**
+hooks = []
+for layer_id, layer in enumerate(model.model.layers):
+    hook = layer.self_attn.register_forward_hook(get_attention_scores_hook(layer_id))
+    hooks.append(hook)
 
-        outputs = model(input_ids, attention_mask=attention_mask, labels=input_ids)
-        loss = outputs.loss
-        
-        model.zero_grad()
-        loss.backward()
-        
-        for name, param in model.named_parameters():
-            if param.requires_grad and param.grad is not None:
-                fisher_value = torch.mean(param.grad.float() ** 2).item()
-                if name not in fisher_info:
-                    fisher_info[name] = fisher_value
-                else:
-                    fisher_info[name] += fisher_value
-    
-    # Normalize Fisher Information
-    for name in fisher_info:
-        fisher_info[name] /= num_batches
-    
-    return fisher_info
+# **输入一个测试文本**
+text = "The quick brown fox jumps over the lazy dog."
+inputs = tokenizer(text, return_tensors="pt").to("cuda")
 
-# Run Fisher Information Computation
-fisher_info = compute_fisher_information(model, dataloader)
+# **执行 Forward Pass**
+with torch.no_grad():
+    model(**inputs)
 
-# Sort Fisher Importance
-sorted_layers = sorted(fisher_info.items(), key=lambda x: x[1], reverse=True)
+# **移除 Hook**
+for hook in hooks:
+    hook.remove()
 
-# Print top 10 most important layers
-print("Top 10 layers by Fisher importance:")
-for layer, importance in sorted_layers[:]:
-    print(f"{layer}: {importance:.6f}")
+# **按注意力分数排序**
+sorted_attn = sorted(attn_scores.items(), key=lambda x: -x[1])
+
+# **输出 Top 10 重要的层**
+print("Top 10 Most Important Layers by Attention Score:")
+for layer, score in sorted_attn[]:
+    print(f"{layer}: {score}")
