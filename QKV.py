@@ -35,20 +35,22 @@ dataset = TextDataset(sentences, tokenizer)
 dataloader = DataLoader(dataset, batch_size=1, shuffle=True)
 
 # Compute Fisher Information
-def compute_fisher_information(model, dataloader, device):
+def compute_fisher_information(model, dataloader):
     fisher_info = {}
     model.eval()
-    model.to(device)
     
     for input_ids, attention_mask in dataloader:
-        input_ids, attention_mask = input_ids.to(device), attention_mask.to(device)
-        
+        # Ensure inputs are on the same device as the model
+        input_device = next(model.parameters()).device
+        input_ids, attention_mask = input_ids.to(input_device), attention_mask.to(input_device)
+
         outputs = model(input_ids, attention_mask=attention_mask, labels=input_ids)
         loss = outputs.loss
-        
+
         model.zero_grad()
         loss.backward()
-        
+
+        # Accumulate Fisher Information per layer
         for name, param in model.named_parameters():
             if param.requires_grad and param.grad is not None:
                 fisher_value = param.grad ** 2  # Fisher Information: E[(∂L/∂w)²]
@@ -56,22 +58,21 @@ def compute_fisher_information(model, dataloader, device):
                     fisher_info[name] = fisher_value.detach().clone()
                 else:
                     fisher_info[name] += fisher_value.detach().clone()
-    
+
     # Normalize Fisher Information
     for name in fisher_info:
         fisher_info[name] /= len(dataloader)
-    
+
     return fisher_info
 
 # Run Fisher Information Computation
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-fisher_info = compute_fisher_information(model, dataloader, device)
+fisher_info = compute_fisher_information(model, dataloader)
 
 # Visualize Fisher Information
 def visualize_fisher(fisher_info):
     layer_names = list(fisher_info.keys())
     fisher_values = [torch.mean(fisher_info[name]).item() for name in layer_names]
-    
+
     plt.figure(figsize=(12, 5))
     plt.barh(layer_names, fisher_values, color='blue')
     plt.xlabel("Fisher Information (Mean)")
@@ -81,3 +82,4 @@ def visualize_fisher(fisher_info):
     plt.show()
 
 visualize_fisher(fisher_info)
+print(fisher_info)
