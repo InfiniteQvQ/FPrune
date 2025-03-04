@@ -2,6 +2,7 @@ import torch
 from transformers import AutoModelForCausalLM, LlamaTokenizer
 from torch.utils.data import DataLoader, Dataset
 import matplotlib.pyplot as plt
+import numpy as np
 
 # Load LLaMA 7B Model
 cache_dir = "/root/autodl-tmp/llm_weights"
@@ -35,44 +36,54 @@ dataset = TextDataset(sentences, tokenizer)
 dataloader = DataLoader(dataset, batch_size=1, shuffle=True)
 
 # Compute Fisher Information
-def compute_fisher_information(model, dataloader):
+def compute_fisher_information(model, dataloader, num_batches=10):
     fisher_info = {}
     model.eval()
     
-    for input_ids, attention_mask in dataloader:
-        # Ensure inputs are on the same device as the model
+    for batch_idx, (input_ids, attention_mask) in enumerate(dataloader):
+        if batch_idx >= num_batches:
+            break
+        
         input_device = next(model.parameters()).device
         input_ids, attention_mask = input_ids.to(input_device), attention_mask.to(input_device)
 
         outputs = model(input_ids, attention_mask=attention_mask, labels=input_ids)
         loss = outputs.loss
-
+        
         model.zero_grad()
         loss.backward()
-
-        # Accumulate Fisher Information per layer
+        
         for name, param in model.named_parameters():
             if param.requires_grad and param.grad is not None:
-                fisher_value = param.grad ** 2  # Fisher Information: E[(∂L/∂w)²]
+                fisher_value = (param.grad.float() ** 2).detach()
                 if name not in fisher_info:
-                    fisher_info[name] = fisher_value.detach().clone()
+                    fisher_info[name] = fisher_value.clone()
                 else:
-                    fisher_info[name] += fisher_value.detach().clone()
-
+                    fisher_info[name] += fisher_value.clone()
+    
     # Normalize Fisher Information
     for name in fisher_info:
-        fisher_info[name] /= len(dataloader)
-
+        fisher_info[name] /= num_batches
+    
     return fisher_info
 
 # Run Fisher Information Computation
 fisher_info = compute_fisher_information(model, dataloader)
 
-# Visualize Fisher Information
-def visualize_fisher(fisher_info):
-    layer_names = list(fisher_info.keys())
-    fisher_values = [torch.mean(fisher_info[name]).item() for name in layer_names]
+# Compute Layer-wise Fisher Importance
+fisher_layer_importance = {name: torch.mean(value).item() for name, value in fisher_info.items()}
+sorted_layers = sorted(fisher_layer_importance.items(), key=lambda x: x[1], reverse=True)
 
+# Print top 10 most important layers
+print("Top 10 layers by Fisher importance:")
+for layer, importance in sorted_layers:
+    print(f"{layer}: {importance:.6f}")
+
+# Visualize Fisher Information
+def visualize_fisher(fisher_layer_importance):
+    layer_names = list(fisher_layer_importance.keys())
+    fisher_values = list(fisher_layer_importance.values())
+    
     plt.figure(figsize=(12, 5))
     plt.barh(layer_names, fisher_values, color='blue')
     plt.xlabel("Fisher Information (Mean)")
@@ -81,5 +92,4 @@ def visualize_fisher(fisher_info):
     plt.gca().invert_yaxis()
     plt.show()
 
-visualize_fisher(fisher_info)
-print(fisher_info)
+
