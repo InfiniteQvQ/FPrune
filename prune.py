@@ -536,9 +536,34 @@ def ww_sparsity_llama_7b_split(args, model, device=torch.device("cuda:0"),
     layerwise_pruning_ratios_esd = layerwise_pruning_ratios_esd.cpu().numpy().tolist()
     print("ESD-based ratios:", layerwise_pruning_ratios_esd)
 
-    importance = np.array([0.3262, 0.2539,0.1846, 0.1846,0.0899,0.0899,0.0899,0.0899,0.0899,0.0899,0.0899,0.0481,0.0481,
-                       0.0389,0.0389,0.0389,0.0317,0.0268,0.0268,0.0268,0.0227,0.0191,0.0191,0.0191,0.0191,
-                       0.0191,0.0191,0.0191,0.0164,0.0157,0.0154,0.0086])
+    segments = {
+        0: [0],
+        1: [1],
+        2: [2],
+        3: [3],
+        4: [4, 5, 6, 7, 8, 9, 10, 11],
+        5: [12, 13, 14],
+        6: [15, 16, 17],
+        7: [18, 19, 20],
+        8: [21, 22, 23],
+        9: [24, 25],
+        10: [26, 27],
+        11: [28, 29],
+        12: [30],
+        13: [31]
+    }
+    segment_importance = np.array([
+        37.2500, 10.2500, 0.8398, 0.5781,
+        0.2174, 0.1138, 0.1027, 0.0973,
+        0.0944, 0.0933, 0.0933, 0.0737,
+        0.0708, 0.0199
+    ])
+    importance = []
+    for seg_id in sorted(segments.keys()):
+        count = len(segments[seg_id])
+        value = segment_importance[seg_id]
+        # 将该 segment 的重要性值复制 count 次
+        importance.extend([value] * count)
     I_min = np.min(importance)
     I_max = np.max(importance)
     norm_importance = (importance - I_min) / (I_max - I_min)
@@ -573,8 +598,6 @@ def ww_sparsity_llama_7b_split(args, model, device=torch.device("cuda:0"),
     print("Combined layerwise pruning ratios:", combined_ratios)
     
     
-
-    return res
    
 def ww_sparsity_llama2_7b_split(args, model, device=torch.device("cuda:0"),
                                 s1=0.8, s2=1.2, ratios=None, prune_n=0, prune_m=0,
@@ -1160,7 +1183,7 @@ def prune_wanda_ww2(args, model, tokenizer, device=torch.device("cuda:0"), prune
     s1 = 1.0 - args.epsilon
     s2 = 1.0 + args.epsilon
 
-    all_layer_ratio = ww_sparsity_llama_7b(args, model, device, s1, s2)
+    all_layer_ratio = ww_sparsity_llama_7b_split(args, model, device, s1, s2)
     # wanda pruning
     prune_wanda(args, model, tokenizer, device, ratios=all_layer_ratio)   
     
