@@ -31,9 +31,9 @@ def forward_hook(module, input, output):
     else:
         hidden_states = output
 
-    # ✅ 保留在当前 GPU 上
+    # ✅ 存储激活值，并确保它存储在计算的 GPU 上
     grad_activation_scores[layer_name] = {
-        "activation": hidden_states.detach()
+        "activation": hidden_states.detach().to(hidden_states.device)  # 确保存储在当前计算的 GPU 上
     }
 
 def backward_hook(module, grad_input, grad_output):
@@ -48,9 +48,17 @@ def backward_hook(module, grad_input, grad_output):
 
     activation = grad_activation_scores[layer_name]["activation"]
 
+    # 🔹 🚀 关键修正：确保 `gradient` 和 `activation` 在同一个 GPU 上
+    if gradient.device != activation.device:
+        activation = activation.to(gradient.device)
+
     # 计算贡献度
     contribution = (gradient * activation).mean().item()
-    grad_activation_scores[layer_name]["contribution"] = contribution
+    
+    # 🚀 确保 `contribution` 统一存到 `cuda:0`
+    grad_activation_scores[layer_name]["contribution"] = torch.tensor(
+        contribution, device="cuda:0"
+    )
 
 # 🔹 绑定 Hooks
 hooks = []
@@ -76,9 +84,7 @@ for hook in hooks:
 # 🔹 统一收集 `梯度 × 激活值` 数据到 `cuda:0`
 for layer_name, data in grad_activation_scores.items():
     if "contribution" in data:
-        grad_activation_scores[layer_name]["contribution"] = torch.tensor(
-            data["contribution"], device="cuda:0"
-        )
+        grad_activation_scores[layer_name]["contribution"] = data["contribution"].to("cuda:0")
 
 # 🔹 提取并排序贡献度
 sorted_grad_activations = sorted(
