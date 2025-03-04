@@ -1,7 +1,6 @@
 import torch
 from transformers import AutoModelForCausalLM, LlamaTokenizer
 from torch.utils.data import DataLoader, Dataset
-import matplotlib.pyplot as plt
 import numpy as np
 
 # Load LLaMA 7B Model
@@ -55,11 +54,11 @@ def compute_fisher_information(model, dataloader, num_batches=10):
         
         for name, param in model.named_parameters():
             if param.requires_grad and param.grad is not None:
-                fisher_value = (param.grad.float() ** 2).detach()
+                fisher_value = torch.mean(param.grad.float() ** 2).item()
                 if name not in fisher_info:
-                    fisher_info[name] = fisher_value.clone()
+                    fisher_info[name] = fisher_value
                 else:
-                    fisher_info[name] += fisher_value.clone()
+                    fisher_info[name] += fisher_value
     
     # Normalize Fisher Information
     for name in fisher_info:
@@ -70,26 +69,10 @@ def compute_fisher_information(model, dataloader, num_batches=10):
 # Run Fisher Information Computation
 fisher_info = compute_fisher_information(model, dataloader)
 
-# Compute Layer-wise Fisher Importance
-fisher_layer_importance = {name: torch.mean(value).item() for name, value in fisher_info.items()}
-sorted_layers = sorted(fisher_layer_importance.items(), key=lambda x: x[1], reverse=True)
+# Sort Fisher Importance
+sorted_layers = sorted(fisher_info.items(), key=lambda x: x[1], reverse=True)
 
 # Print top 10 most important layers
 print("Top 10 layers by Fisher importance:")
-for layer, importance in sorted_layers:
+for layer, importance in sorted_layers[:]:
     print(f"{layer}: {importance:.6f}")
-
-# Visualize Fisher Information
-def visualize_fisher(fisher_layer_importance):
-    layer_names = list(fisher_layer_importance.keys())
-    fisher_values = list(fisher_layer_importance.values())
-    
-    plt.figure(figsize=(12, 5))
-    plt.barh(layer_names, fisher_values, color='blue')
-    plt.xlabel("Fisher Information (Mean)")
-    plt.ylabel("Layers")
-    plt.title("Fisher Information for Each Layer in LLaMA 7B")
-    plt.gca().invert_yaxis()
-    plt.show()
-
-
