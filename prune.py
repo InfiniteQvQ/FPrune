@@ -569,6 +569,7 @@ def ww_sparsity_llama_7b_split(args, model, device=torch.device("cuda:0"),
     scaler = target_sparsity / (current_mean_sparsity + 1e-9)
     importance_scores *= scaler
     print(importance_scores)
+    print("mean: ", np.mean(importance_scores) )
     res = []
     for i in range(32):
         for j in range(7):
