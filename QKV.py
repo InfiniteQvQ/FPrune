@@ -1,47 +1,83 @@
-default_weight = 0.1428571428571429
-baseline_value =  24.140140533447266
-# 原始数值
-raw_values = [23.4, 23.72, 23.82, 23.98, 24.46, 24.37, 24.21]
-components = ["Q", "K", "V", "Output", "Gate", "Up", "Down"]
+import torch
+from transformers import AutoModelForCausalLM, LlamaTokenizer
+from torch.utils.data import DataLoader, Dataset
+import matplotlib.pyplot as plt
 
-# 计算每个组件与基准值的差异
-differences = [v - baseline_value for v in raw_values]
+# Load LLaMA 7B Model
+cache_dir = "/root/autodl-tmp/llm_weights"
+model = AutoModelForCausalLM.from_pretrained(
+    "pinkmanlove/llama-7b-hf",
+    cache_dir=cache_dir,
+    device_map="auto",  # Automatically distribute across GPUs
+    torch_dtype=torch.float16
+)
 
-# 计算平均差异
-mean_diff = sum(differences) / len(differences)
+tokenizer_name = "HuggingFaceM4/llama-7b-tokenizer"
+tokenizer = LlamaTokenizer.from_pretrained(tokenizer_name)
 
-# 设置缩放因子 s，保证调整后权重不会相差太大，最好使最高不超过0.15
-s = 0.008
+# Sample Dataset (Replace with your own dataset)
+class TextDataset(Dataset):
+    def __init__(self, texts, tokenizer, max_length=128):
+        self.texts = texts
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+    
+    def __len__(self):
+        return len(self.texts)
+    
+    def __getitem__(self, idx):
+        encoding = self.tokenizer(self.texts[idx], max_length=self.max_length, padding="max_length", truncation=True, return_tensors="pt")
+        return encoding.input_ids.squeeze(0), encoding.attention_mask.squeeze(0)
 
-# 计算每个组件的权重
-weights = [default_weight - s * (d - mean_diff) for d in differences]
+# Example sentences (Replace with real dataset)
+sentences = ["The quick brown fox jumps over the lazy dog.", "Artificial intelligence is revolutionizing the world."]
+dataset = TextDataset(sentences, tokenizer)
+dataloader = DataLoader(dataset, batch_size=1, shuffle=True)
 
-# 输出结果
-for comp, w in zip(components, weights):
-    print(f"{comp}: {w:.6f}")
+# Compute Fisher Information
+def compute_fisher_information(model, dataloader, device):
+    fisher_info = {}
+    model.eval()
+    model.to(device)
+    
+    for input_ids, attention_mask in dataloader:
+        input_ids, attention_mask = input_ids.to(device), attention_mask.to(device)
+        
+        outputs = model(input_ids, attention_mask=attention_mask, labels=input_ids)
+        loss = outputs.loss
+        
+        model.zero_grad()
+        loss.backward()
+        
+        for name, param in model.named_parameters():
+            if param.requires_grad and param.grad is not None:
+                fisher_value = param.grad ** 2  # Fisher Information: E[(∂L/∂w)²]
+                if name not in fisher_info:
+                    fisher_info[name] = fisher_value.detach().clone()
+                else:
+                    fisher_info[name] += fisher_value.detach().clone()
+    
+    # Normalize Fisher Information
+    for name in fisher_info:
+        fisher_info[name] /= len(dataloader)
+    
+    return fisher_info
 
-print("Sum:", sum(weights))
+# Run Fisher Information Computation
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+fisher_info = compute_fisher_information(model, dataloader, device)
 
-default_weight = 0.1428571428571429
-baseline_value =  637.44
-# 原始数值
-raw_values = [614.8, 612.25, 584.624,  599.94, 680.39,  652,  655.626]
-components = ["Q", "K", "V", "Output", "Gate", "Up", "Down"]
+# Visualize Fisher Information
+def visualize_fisher(fisher_info):
+    layer_names = list(fisher_info.keys())
+    fisher_values = [torch.mean(fisher_info[name]).item() for name in layer_names]
+    
+    plt.figure(figsize=(12, 5))
+    plt.barh(layer_names, fisher_values, color='blue')
+    plt.xlabel("Fisher Information (Mean)")
+    plt.ylabel("Layers")
+    plt.title("Fisher Information for Each Layer in LLaMA 7B")
+    plt.gca().invert_yaxis()
+    plt.show()
 
-# 计算每个组件与基准值的差异
-differences = [v - baseline_value for v in raw_values]
-
-# 计算平均差异
-mean_diff = sum(differences) / len(differences)
-
-# 设置缩放因子 s，保证调整后权重不会相差太大，最好使最高不超过0.15
-s = 0.0002
-
-# 计算每个组件的权重
-weights = [default_weight - s * (d - mean_diff) for d in differences]
-
-# 输出结果
-for comp, w in zip(components, weights):
-    print(f"{comp}: {w:.6f}")
-
-print("Sum 8B:", sum(weights))
+visualize_fisher(fisher_info)
