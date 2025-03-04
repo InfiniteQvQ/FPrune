@@ -572,23 +572,7 @@ def ww_sparsity_llama_7b_split(args, model, device=torch.device("cuda:0"),
     
     print("Combined layerwise pruning ratios:", combined_ratios)
     
-    res = []
-
-    for i in range(32):
-        #Q
-        res.append(combined_ratios[i*7] * 0.142857* 7 )
-        #K
-        res.append(combined_ratios[i*7]  *0.142857 * 7 )
-        #V
-        res.append(combined_ratios[i*7]  *0.142857  * 7 )
-        #OUT
-        res.append(combined_ratios[i*7]  * 0.142857 * 7  )
-        #GATE1
-        res.append(combined_ratios[i*7]  *0.142757  * 7   )
-        #UP
-        res.append(combined_ratios[i*7]  *0.142907 * 7  )
-        #DOWN
-        res.append(combined_ratios[i*7]  * 0.142907 * 7  )
+    
 
     return res
    
@@ -845,7 +829,7 @@ def ww_sparsity_llama3_8b(args, model, device=torch.device("cuda:0"),
 
 def ww_sparsity_llama_7b(args, model, device=torch.device("cuda:0"),
                          s1=0.8, s2=1.2, ratios=None, prune_n=0, prune_m=0,
-                         weight_esd=0.2, eps=1e-8):
+                         weight_esd=0.8, eps=1e-8):
     if "opt" in args.model:
         blocks = model.model.decoder.layers    
     else:
@@ -1176,7 +1160,7 @@ def prune_wanda_ww2(args, model, tokenizer, device=torch.device("cuda:0"), prune
     s1 = 1.0 - args.epsilon
     s2 = 1.0 + args.epsilon
 
-    all_layer_ratio = ww_sparsity_llama_7b_split(args, model, device, s1, s2)
+    all_layer_ratio = ww_sparsity_llama_7b(args, model, device, s1, s2)
     # wanda pruning
     prune_wanda(args, model, tokenizer, device, ratios=all_layer_ratio)   
     
