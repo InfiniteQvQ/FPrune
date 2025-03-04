@@ -71,3 +71,5 @@ influence_tensor = torch.tensor(influence_scores, dtype=torch.float32, device=de
 # **打印影响分数**
 print("\n🔥 Influence Scores for Each Component 🔥")
 print(influence_tensor)
+
+

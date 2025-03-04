@@ -1,6 +1,6 @@
 import torch
 from transformers import AutoModelForCausalLM, LlamaTokenizer
-
+import numpy as np
 # ✅ 自动适配多 GPU
 device_count = torch.cuda.device_count()
 device_map = {i: f"cuda:{i}" for i in range(device_count)}
@@ -77,3 +77,10 @@ sorted_grad_activations = sorted(
 print("\n🚀 **梯度 × 激活值 贡献度（按重要性排序）** 🚀\n")
 for layer, score in sorted_grad_activations:
     print(f"{layer}: Contribution={score:.6f}")
+
+sorted_layer_importance = sorted(sorted_grad_activations.items(), key=lambda x: int(x[0].split("_")[-1]))
+
+# 转换为数组
+sorted_layer_importance_values = np.array([v for _, v in sorted_layer_importance])
+
+print("🚀 按层排序后的梯度 × 激活值贡献度:", sorted_layer_importance_values)
