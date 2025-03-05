@@ -4,20 +4,36 @@ import gym
 import numpy as np
 import torch
 import torch.nn as nn
-from stable_baselines3 import PPO
 from transformers import AutoModelForCausalLM, LlamaTokenizer
+from stable_baselines3 import PPO
 from datasets import load_dataset
 from lib.layerwrapper import WrappedGPT
 from lib.data import get_loaders
 import warnings
+import multiprocessing as mp
+
+#############################################
+# 模型加载函数，每次调用返回新模型
+def get_llm(model_path, cache_dir="/root/autodl-tmp/llm_weights"):
+    model = AutoModelForCausalLM.from_pretrained(
+        model_path,
+        torch_dtype=torch.bfloat16,
+        cache_dir=cache_dir,
+        low_cpu_mem_usage=True,
+        device_map="auto"
+    )
+    # 设置序列长度
+    model.seqlen = model.config.max_position_embeddings
+    return model
 
 #############################################
 # Calibration 函数：在 CPU 上创建校准数据
 def prepare_calibration_input(model, dataloader, device, nsamples):
     layers = model.model.layers
-    init_device = "cpu"  # 先在 CPU 上创建数据
+    init_device = "cpu"  # 数据先创建在 CPU 上
     dtype = next(iter(model.parameters())).dtype
-    inps = torch.zeros((nsamples, model.seqlen, model.config.hidden_size), dtype=dtype, device=init_device)
+    inps = torch.zeros((nsamples, model.seqlen, model.config.hidden_size),
+                       dtype=dtype, device=init_device)
     inps.requires_grad = False
     cache = {'i': 0, 'attention_mask': None, "position_ids": None}
 
@@ -48,7 +64,8 @@ def prepare_calibration_input_opt(model, dataloader, device, nsamples):
     layers = model.model.decoder.layers
     init_device = "cpu"
     dtype = next(iter(model.parameters())).dtype
-    inps = torch.zeros((nsamples, model.seqlen, model.config.hidden_size), dtype=dtype, device=init_device)
+    inps = torch.zeros((nsamples, model.seqlen, model.config.hidden_size),
+                       dtype=dtype, device=init_device)
     inps.requires_grad = False
     cache = {'i': 0, 'attention_mask': None}
     
@@ -80,7 +97,8 @@ def find_layers(module, layers=[nn.Linear], name=''):
         return {name: module}
     res = {}
     for name1, child in module.named_children():
-        res.update(find_layers(child, layers=layers, name=name + '.' + name1 if name != '' else name1))
+        res.update(find_layers(child, layers=layers,
+                               name=name + '.' + name1 if name != '' else name1))
     return res
 
 def return_given_alpha(alpha, sort_res, W_metric, tmp_metric, sum_before):
@@ -129,7 +147,6 @@ def prune_wanda_ww_cached(args, model, tokenizer, device, prune_ratios, cal_data
         handles = []
         for name in wrapped_layers:
             handles.append(subset[name].register_forward_hook(add_batch(name)))
-        # 为减少内存，每次仅处理 1 个样本（如果 nsamples=1，则降低内存占用）
         for j in range(inps.shape[0]):
             with torch.no_grad():
                 sample_inp = inps[j].unsqueeze(0).to(dev)
@@ -184,22 +201,44 @@ def prune_wanda_ww_cached(args, model, tokenizer, device, prune_ratios, cal_data
                 else:
                     outs[j] = layer(sample_inp, attention_mask=sample_attention, position_ids=sample_position_ids)[0]
         inps = outs.cpu()
-    model.config.use_cache = use_cache
     torch.cuda.empty_cache()
 
 #############################################
-# RL 环境：每个 episode 重新加载模型，并预先加载好校准数据，RL 仅调整参数
+# 定义一个独立函数，在子进程中加载模型、运行 Wanda 剪枝，并返回 loss
+def evaluate_pruning(pruning_params, args, model_path, cache_dir, tokenizer, inputs):
+    model = AutoModelForCausalLM.from_pretrained(
+        model_path,
+        cache_dir=cache_dir,
+        device_map="auto",
+        torch_dtype=torch.float16
+    )
+    model.seqlen = model.config.max_position_embeddings
+    dataloader, _ = get_loaders("c4", nsamples=args.nsamples, seed=args.seed,
+                                 seqlen=model.seqlen, tokenizer=tokenizer)
+    with torch.no_grad():
+        if "OPT" in model.__class__.__name__:
+            cal_data = prepare_calibration_input_opt(model, dataloader, "cpu", args.nsamples)
+        else:
+            cal_data = prepare_calibration_input(model, dataloader, "cpu", args.nsamples)
+    prune_wanda_ww_cached(args, model, tokenizer, "cuda", prune_ratios=pruning_params, cal_data=cal_data)
+    with torch.no_grad():
+        outputs = model(**inputs, labels=inputs["input_ids"])
+        loss = outputs.loss.item()
+    return loss
+
+#############################################
+# RL 环境：每个 episode 通过子进程运行剪枝评估
 class PruningEnv(gym.Env):
     """
     RL 环境：
-      - 每个 episode 重新加载模型（通过 model_loader）。
-      - 在 reset() 中预先加载校准数据并缓存到 self.cal_data。
+      - 每个 episode 通过子进程运行 evaluate_pruning() 来完成剪枝评估，
+        每次都完全独立加载模型、运行 Wanda 剪枝，结束后子进程退出释放显存。
       - RL 动作为每层的 ESD 权重（用于融合 ESD 和 GradNorm）。
-      - 在 step() 中调用 prune_wanda_ww_cached()，然后计算剪枝后模型 loss 作为 reward。
     """
-    def __init__(self, model_loader, esd_ratios, importance_scores, args, tokenizer, device, inputs, base_loss):
+    def __init__(self, model_path, esd_ratios, importance_scores, args, tokenizer, device, inputs, base_loss, cache_dir):
         super(PruningEnv, self).__init__()
-        self.model_loader = model_loader  # 每次返回新模型
+        self.model_path = model_path
+        self.cache_dir = cache_dir
         self.esd_ratios = esd_ratios
         self.importance_scores = importance_scores
         self.num_layers = len(esd_ratios)
@@ -210,37 +249,23 @@ class PruningEnv(gym.Env):
         self.base_loss = base_loss
         self.action_space = gym.spaces.Box(low=0.0, high=1.0, shape=(self.num_layers,), dtype=np.float32)
         self.observation_space = gym.spaces.Box(low=0.0, high=1.0, shape=(self.num_layers*2,), dtype=np.float32)
-        self.cal_data = None
-
+    
     def reset(self):
-        self.model = self.model_loader()
-        if not hasattr(self.model, 'seqlen'):
-            self.model.seqlen = self.model.config.max_position_embeddings
-        dataloader, _ = get_loaders("c4", nsamples=self.args.nsamples,
-                                    seed=self.args.seed, seqlen=self.model.seqlen,
-                                    tokenizer=self.tokenizer)
-        with torch.no_grad():
-            if "OPT" in self.model.__class__.__name__:
-                self.cal_data = prepare_calibration_input_opt(self.model, dataloader, self.device, self.args.nsamples)
-            else:
-                self.cal_data = prepare_calibration_input(self.model, dataloader, self.device, self.args.nsamples)
         return np.concatenate([self.esd_ratios, self.importance_scores])
     
     def step(self, action):
         esd_weights = np.clip(action, 0.0, 1.0)
         final_pruning_ratios = esd_weights * self.esd_ratios + (1 - esd_weights) * self.importance_scores
-        prune_wanda_ww_cached(self.args, self.model, self.tokenizer, self.device,
-                                prune_ratios=final_pruning_ratios, cal_data=self.cal_data)
-        with torch.no_grad():
-            outputs = self.model(**self.inputs, labels=self.inputs["input_ids"])
-            pruned_loss = outputs.loss.item()
-        loss_increase = (pruned_loss - self.base_loss) / self.base_loss
+        pool = mp.Pool(processes=1)
+        loss = pool.apply(evaluate_pruning, (final_pruning_ratios, self.args,
+                                              self.model_path, self.cache_dir,
+                                              self.tokenizer, self.inputs))
+        pool.close()
+        pool.join()
+        loss_increase = (loss - self.base_loss) / self.base_loss
         reward = -loss_increase
         done = True
         obs = np.concatenate([self.esd_ratios, self.importance_scores])
-        del self.model
-        del self.cal_data
-        torch.cuda.empty_cache()
         return obs, reward, done, {}
 
 #############################################
@@ -254,7 +279,7 @@ if __name__ == "__main__":
     parser.add_argument('--sparsity_ratio', type=float, default=0.7, help="目标剪枝比例")
     parser.add_argument('--prune_method', type=str, default="wanda_ww", help="剪枝方法")
     parser.add_argument('--epsilon', type=float, default=0.2, help="剪枝比例的微调范围")
-    parser.add_argument('--nsamples', type=int, default=1, help="校准样本数")  # 尝试用更小的 nsamples
+    parser.add_argument('--nsamples', type=int, default=1, help="校准样本数")
     parser.add_argument('--seed', type=int, default=42, help="随机种子")
     parser.add_argument('--use_variant', action='store_true', help="是否使用 Wanda variant 剪枝")
     args = parser.parse_args()
@@ -263,13 +288,11 @@ if __name__ == "__main__":
     torch.manual_seed(args.seed)
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    # 定义模型加载函数，供 RL 环境调用，每次返回新模型
-    model_loader = lambda: AutoModelForCausalLM.from_pretrained(
-        args.model, cache_dir=args.cache_dir, device_map="auto", torch_dtype=torch.float16
-    )
+    model_path = args.model
+    cache_dir = args.cache_dir
     
     # 预先加载一次模型用于 baseline 评估
-    model = model_loader()
+    model = get_llm(model_path, cache_dir)
     tokenizer_name = "HuggingFaceM4/llama-7b-tokenizer"
     tokenizer = LlamaTokenizer.from_pretrained(tokenizer_name)
     if not hasattr(model, 'seqlen'):
@@ -302,9 +325,9 @@ if __name__ == "__main__":
         0.7545204,  0.764797
     ])
     
-    # 创建 RL 环境：每个 episode 重新加载模型和预先加载校准数据
-    env = PruningEnv(model_loader, esd_ratios, importance_scores, args, tokenizer, device, inputs, base_loss)
-    # 让 PPO 的策略网络在 CPU 上运行，避免额外 GPU 占用
+    # 创建 RL 环境，每个 episode 都在独立子进程中执行评估
+    env = PruningEnv(model_path, esd_ratios, importance_scores, args, tokenizer, device, inputs, base_loss, cache_dir)
+    # 让 PPO 策略网络在 CPU 上运行
     model_rl = PPO("MlpPolicy", env, verbose=1, device='cpu')
     model_rl.learn(total_timesteps=5000)
     
