@@ -337,7 +337,7 @@ def ww_sparsity_enhanced(args, model, device=torch.device("cuda:0"),
     
 def ww_sparsity_test(args, model, device=torch.device("cuda:0"),
                          s1=0.8, s2=1.2, ratios=None, prune_n=0, prune_m=0,
-                         weight_esd=0.1, eps=1e-8):
+                         weight_esd=0.85, eps=1e-8):
     # ---------------------- 基于ESD的剪枝比例计算 ----------------------
     if "opt" in args.model:
         blocks = model.model.decoder.layers    
