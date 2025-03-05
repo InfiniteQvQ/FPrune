@@ -233,7 +233,6 @@ def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0
     model.config.use_cache = use_cache 
     torch.cuda.empty_cache()
 
-# ------------------- RL 环境 -------------------
 class PruningEnv(gym.Env):
     def __init__(self, model, esd_ratios, importance_scores, args, tokenizer, device, inputs, base_loss):
         super(PruningEnv, self).__init__()
@@ -246,34 +245,26 @@ class PruningEnv(gym.Env):
         self.device = device
         self.inputs = inputs
         self.base_loss = base_loss
-
-        # 保存模型初始状态到 CPU，避免 GPU 内存不足
+        # 保存模型初始状态到 CPU
         self.initial_state = copy.deepcopy({k: v.cpu() for k, v in model.state_dict().items()})
-
         # 定义动作空间：每层的 ESD 权重取值范围 [0,1]
         self.action_space = gym.spaces.Box(low=0.0, high=1.0, shape=(self.num_layers,), dtype=np.float32)
-        # 定义观察空间：这里返回固定的剪枝比率信息（可根据需要扩展）
+        # 定义观察空间（这里返回固定的剪枝比率信息）
         self.observation_space = gym.spaces.Box(low=0.0, high=1.0, shape=(self.num_layers * 2,), dtype=np.float32)
 
     def reset(self):
-        # 恢复模型为初始状态，并转回目标设备
+        # 恢复模型为初始状态（不调用 .to() 避免 accelerate hooks 问题）
         self.model.load_state_dict(self.initial_state)
-        self.model.to(self.device)
-        # 重置默认的 ESD 权重（例如 0.8）
         self.esd_weights = np.ones(self.num_layers) * 0.8
         return np.concatenate([self.esd_ratios, self.importance_scores])
 
     def step(self, action):
         self.esd_weights = np.clip(action, 0.0, 1.0)
         final_pruning_ratios = self.esd_weights * self.esd_ratios + (1 - self.esd_weights) * self.importance_scores
-
-        # 执行剪枝操作（剪枝后的模型状态会影响 Loss）
         prune_wanda_ww(self.args, self.model, self.tokenizer, self.device, prune_ratios=final_pruning_ratios)
-        
         with torch.no_grad():
             outputs = self.model(**self.inputs, labels=self.inputs["input_ids"])
             pruned_loss = outputs.loss.item()
-
         loss_increase = (pruned_loss - self.base_loss) / self.base_loss
         reward = -loss_increase
         done = True
@@ -292,7 +283,6 @@ if __name__ == "__main__":
     parser.add_argument('--epsilon', type=float, default=0.2, help="剪枝比例的微调范围")
     parser.add_argument('--nsamples', type=int, default=10, help="校准样本数")
     parser.add_argument('--seed', type=int, default=42, help="随机种子")
-    # 如果使用 variant 剪枝，则需要该参数
     parser.add_argument('--use_variant', action='store_true', help="是否使用 Wanda variant 剪枝")
     args = parser.parse_args()
 
@@ -311,7 +301,6 @@ if __name__ == "__main__":
         base_loss = outputs.loss.item()
     print(f"🚀 剪枝前 LLaMA-7B 在 TinyStories Loss: {base_loss:.6f}")
 
-    # 示例数据：ESD 剪枝比例和 GradNorm（或其他重要性指标）
     esd_ratios = np.array([
         0.57042164, 0.61759788, 0.63153112, 0.63073802, 0.65285629, 0.6482451,
         0.63005912, 0.5921672 , 0.59738964, 0.56803465, 0.58708227, 0.58937198,
@@ -335,7 +324,6 @@ if __name__ == "__main__":
 
     best_action = model_rl.predict(env.reset())[0]
     print(f"🚀 最优 ESD 权重（每层）: {best_action}")
-
     final_pruning_ratios = best_action * esd_ratios + (1 - best_action) * importance_scores
     print("🔥 RL 计算的最终剪枝比例:", final_pruning_ratios)
     np.save("final_pruning_ratios_rl.npy", final_pruning_ratios)
