@@ -507,35 +507,40 @@ def ww_sparsity_llama_7b_split(args, model, device=torch.device("cuda:0"),
     else:
         blocks = model.model.layers
 
-    # 得到待剪枝层字典，假设 find_layers 返回的顺序与 transformer 层顺序一致，
-    # 每个 transformer 层内有7个子层
-    layers = [find_layers(blocks)]
+    # 假设 find_layers(block) 返回每个 block 中需剪枝的子层字典（顺序一致，每层7个模块）
+    layers = [find_layers(block) for block in blocks]
     prunables = []
     for layer in layers:
         for name in layer:
             prunables.append(layer[name].weight.numel())
-    layer_num_in_block = int(len(prunables) / len(blocks))
-    
+    layer_num_in_block = int(len(prunables) / len(blocks))  # 应该为7
+
+    # ------------------ ESD 部分 ------------------
     # 加载ESD指标
     metrics = np.load(f"{args.ww_metric_cache}/{args.ww_metric}.npy")
     print("ESD raw metrics:", metrics)
     if args.mapping_type == 'block_wise':
-        block_metrics = [np.mean(metrics[i:i+layer_num_in_block]) 
+        # 对每个 block 内的 7 个模块取均值
+        block_metrics = [np.mean(metrics[i:i+layer_num_in_block])
                          for i in range(0, len(metrics), layer_num_in_block)]
-        metrics = [i for i in block_metrics for j in range(layer_num_in_block)]
+        # 对每个 block 复制 7 次
+        metrics = [val for val in block_metrics for _ in range(layer_num_in_block)]
     print("ESD metric values after block_wise processing:", metrics)
             
     scores = torch.tensor(metrics, dtype=torch.float32)
     prunables_tensor = torch.tensor(prunables, dtype=torch.float32)
     max_score = torch.max(scores)
     min_score = torch.min(scores)
-    # 线性映射到 [s1, s2]
-    layerwise_pruning_ratios_esd = (((scores - min_score) / (max_score - min_score)) * (s2 - s1) + s1)
+    # 线性映射 ESD 数值到 [s1, s2]
+    layerwise_pruning_ratios_esd = (((scores - min_score) / (max_score - min_score + eps)) * (s2 - s1) + s1)
+    # 校正以满足整体稀疏率要求
     scaler = torch.sum(prunables_tensor) * args.sparsity_ratio / (torch.sum(prunables_tensor * layerwise_pruning_ratios_esd))
     layerwise_pruning_ratios_esd = layerwise_pruning_ratios_esd * scaler
     layerwise_pruning_ratios_esd = layerwise_pruning_ratios_esd.cpu().numpy().tolist()
     print("ESD-based ratios:", layerwise_pruning_ratios_esd)
 
+    # ------------------ 分段重要性部分（代表 gradNorm） ------------------
+    # 预定义分段信息，将 32 层划分为 14 个段
     segments = {
         0: [0],
         1: [1],
@@ -552,33 +557,43 @@ def ww_sparsity_llama_7b_split(args, model, device=torch.device("cuda:0"),
         12: [30],
         13: [31]
     }
-    layerwise_pruning_ratios_esd = np.array(layerwise_pruning_ratios_esd, dtype=np.float32)
+    # 预定义各段的原始重要性
+    seg_importance_raw = np.array([37.25, 10.25, 0.8398, 0.5781, 0.2174, 0.1138,
+                                   0.1027, 0.0973, 0.0944, 0.0933, 0.0933, 0.0737,
+                                   0.0708, 0.0199], dtype=np.float32)
+    # 先对各段重要性做 min-max 归一化（得到 0~1 之间的值）
+    seg_importance_norm = (seg_importance_raw - seg_importance_raw.min()) / (seg_importance_raw.max() - seg_importance_raw.min() + eps)
+    # 为 32 层赋值：每层的归一化重要性取决于它所属的分段
+    layer_importance = np.zeros(32, dtype=np.float32)
+    for seg_id, layer_list in segments.items():
+        for layer_idx in layer_list:
+            layer_importance[layer_idx] = seg_importance_norm[seg_id]
+    print("Normalized layer importance per layer:", layer_importance)
 
-    importance_scores =  np.array([ 2.08616257e-06,  2.92062759e-06,  7.15255737e-07,  5.96046448e-07,
-        3.57627869e-07, -5.96046448e-07, -5.36441803e-07, -6.55651093e-07,
-        3.57627869e-07, -2.98023224e-07, -1.19209290e-06, -8.94069672e-07,
-        -4.17232513e-07, -0.00000000e+00,  2.38418579e-07, -1.19209290e-07,
-        7.74860382e-07,  1.37090683e-06,  7.74860382e-07,  1.01327896e-06,
-        1.84774399e-06,  1.60932541e-06,  2.80141830e-06,  2.86102295e-06,
-        3.21865082e-06,  3.63588333e-06,  4.41074371e-06 , 5.00679016e-06,
-        5.12599945e-06,  5.48362732e-06,  5.36441803e-07, -0.00000000e+00])
-    importance_scores = importance_scores - importance_scores.min()  # 使最小值为 0
-    importance_scores = importance_scores / (importance_scores.max() + 1e-9)
-    target_sparsity = 0.3
-    current_mean_sparsity = np.mean(importance_scores)
-    scaler = target_sparsity / (current_mean_sparsity + 1e-9)
-    importance_scores *= scaler
-    print(importance_scores)
-    print("mean: ", np.mean(importance_scores) )
-    print("esd mean: ", np.mean(layerwise_pruning_ratios_esd))
-    res = []
-    for i in range(32):
-        for j in range(7):
-            res.append(importance_scores[i])
-    res = np.array(res)
-    final_pruning_ratios = 0.8 * layerwise_pruning_ratios_esd + (1 - 0.8) * (1-res)
+    # 对 layer_importance 再进行线性变换，保证最终 (1 - new_importance) 作为剪枝倾向：
+    # 使得平均 (1 - new_importance) = 0.7，且最大不超过 1
+    # 当取 I_new = a * layer_importance + b 时，我们要求：
+    #   当 layer_importance 最小（通常为0）时，1 - (a*min + b) = 1  -> a*min + b = 0
+    #   同时 1 - (a*avg + b) = 0.7  -> a*avg + b = 0.3
+    # 则 a = 0.3 / (avg - min + eps)，b = - a * min
+    avg_val = np.mean(layer_importance)
+    min_val = np.min(layer_importance)
+    a = 0.3 / (avg_val - min_val + eps)
+    b = - a * min_val
+    new_importance = a * layer_importance + b
+    # 取 (1 - new_importance) 作为剪枝倾向，即重要性越高希望剪枝比例越低
+    grad_prune_tendency = 1 - new_importance
+    # 限制最大不超过 1（通常当 min 为0时，最大值即为1）
+    grad_prune_tendency = np.clip(grad_prune_tendency, 0, 1)
+    print("Transformed grad-based pruning tendency per layer, mean =", np.mean(grad_prune_tendency))
+    # 将每层的剪枝倾向复制 7 次，得到每个模块的值
+    grad_part = np.repeat(grad_prune_tendency, layer_num_in_block)
+    
+    # ------------------ 最终组合 ------------------
+    # 最终剪枝比例由 ESD 部分与 grad 部分按权重加权组合（例如：0.8*ESD + 0.2*grad）
+    final_pruning_ratios = 0.8 * np.array(layerwise_pruning_ratios_esd) + 0.2 * grad_part
     print("🔥 最终剪枝比例:", final_pruning_ratios)
-    print("all mean: ", final_pruning_ratios)
+    print("all mean: ", np.mean(final_pruning_ratios))
     return final_pruning_ratios
     
    
