@@ -12,12 +12,13 @@ from lib.data import get_loaders
 import warnings
 
 # ------------------- Calibration 函数 -------------------
-def prepare_calibration_input(model, dataloader, device):
-    # 将校准数据在 CPU 上创建，后续再根据模型层设备转移
+def prepare_calibration_input(model, dataloader, device, nsamples):
+    # 校准数据先在 CPU 上创建，减少 GPU 内存占用
     layers = model.model.layers
     init_device = "cpu"
     dtype = next(iter(model.parameters())).dtype
-    inps = torch.zeros((128, model.seqlen, model.config.hidden_size), dtype=dtype, device=init_device)
+    # 使用 nsamples 而不是固定128
+    inps = torch.zeros((nsamples, model.seqlen, model.config.hidden_size), dtype=dtype, device=init_device)
     inps.requires_grad = False
     cache = {'i': 0, 'attention_mask': None, "position_ids": None}
 
@@ -26,8 +27,7 @@ def prepare_calibration_input(model, dataloader, device):
             super().__init__()
             self.module = module
         def forward(self, inp, **kwargs):
-            # 保存输入到 CPU
-            inps[cache['i']] = inp.cpu()
+            inps[cache['i']] = inp.cpu()  # 保存到 CPU
             cache['i'] += 1
             cache['attention_mask'] = kwargs['attention_mask']
             cache['position_ids'] = kwargs.get('position_ids', None)
@@ -45,11 +45,11 @@ def prepare_calibration_input(model, dataloader, device):
     position_ids = cache['position_ids']
     return inps, outs, attention_mask, position_ids
 
-def prepare_calibration_input_opt(model, dataloader, device):
+def prepare_calibration_input_opt(model, dataloader, device, nsamples):
     layers = model.model.decoder.layers
     init_device = "cpu"
     dtype = next(iter(model.parameters())).dtype
-    inps = torch.zeros((128, model.seqlen, model.config.hidden_size), dtype=dtype, device=init_device)
+    inps = torch.zeros((nsamples, model.seqlen, model.config.hidden_size), dtype=dtype, device=init_device)
     inps.requires_grad = False
     cache = {'i': 0, 'attention_mask': None}
     
@@ -112,13 +112,14 @@ def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0
     model.config.use_cache = False 
 
     print("loading calibration data")
+    # 将 nsamples 参数传入
     dataloader, _ = get_loaders("c4", nsamples=args.nsamples, seed=args.seed, seqlen=model.seqlen, tokenizer=tokenizer)
     print("dataset loading complete")
     with torch.no_grad():
         if "OPT" in model.__class__.__name__:
-            inps, outs, attention_mask, position_ids = prepare_calibration_input_opt(model, dataloader, device)
+            inps, outs, attention_mask, position_ids = prepare_calibration_input_opt(model, dataloader, device, args.nsamples)
         else:
-            inps, outs, attention_mask, position_ids = prepare_calibration_input(model, dataloader, device)
+            inps, outs, attention_mask, position_ids = prepare_calibration_input(model, dataloader, device, args.nsamples)
     print("inps", inps.shape)
     if "OPT" in model.__class__.__name__:
         layers = model.model.decoder.layers
@@ -132,15 +133,12 @@ def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0
     for i in range(len(layers)):
         layer = layers[i]
         subset = find_layers(layer)
-        # 根据 device_map，将校准数据转移到对应设备
+        # 如果当前层对应设备在 device_map 中，则取对应 device
         if f"model.layers.{i}" in model.hf_device_map:
             dev = model.hf_device_map[f"model.layers.{i}"]
             print(f"using wanda! layer {i} device {dev}")
-            inps = inps.to(dev)
-            outs = outs.to(dev)
-            attention_mask = attention_mask.to(dev)
-            if position_ids is not None:
-                position_ids = position_ids.to(dev)
+            # 这里不要一次性将整个 inps 转移，而是在后续循环中逐个移动
+            # inps, outs, attention_mask, position_ids = inps.to(dev), outs.to(dev), attention_mask.to(dev), position_ids.to(dev)
         wrapped_layers = {}
         for name in subset:
             wrapped_layers[name] = WrappedGPT(subset[name])
@@ -151,12 +149,20 @@ def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0
         handles = []
         for name in wrapped_layers:
             handles.append(subset[name].register_forward_hook(add_batch(name)))
+        # 循环处理 nsamples 个样本：每个样本单独转移到当前层设备再做前向计算
         for j in range(args.nsamples):
             with torch.no_grad():
-                if "OPT" in model.__class__.__name__:
-                    outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask)[0]
+                # 将当前样本转移到目标设备
+                sample_inp = inps[j].unsqueeze(0).to(dev)
+                sample_attention = attention_mask.to(dev)
+                if position_ids is not None:
+                    sample_position_ids = position_ids.to(dev)
                 else:
-                    outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+                    sample_position_ids = None
+                if "OPT" in model.__class__.__name__:
+                    outs[j] = layer(sample_inp, attention_mask=sample_attention)[0]
+                else:
+                    outs[j] = layer(sample_inp, attention_mask=sample_attention, position_ids=sample_position_ids)[0]
         for h in handles:
             h.remove()
         for name in subset:
@@ -193,11 +199,19 @@ def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0
             subset[name].weight.data[W_mask] = 0
         for j in range(args.nsamples):
             with torch.no_grad():
-                if "OPT" in model.__class__.__name__:
-                    outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask)[0]
+                # 同样，每个样本逐个转移进行前向
+                sample_inp = inps[j].unsqueeze(0).to(dev)
+                sample_attention = attention_mask.to(dev)
+                if position_ids is not None:
+                    sample_position_ids = position_ids.to(dev)
                 else:
-                    outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
-        inps, outs = outs, inps
+                    sample_position_ids = None
+                if "OPT" in model.__class__.__name__:
+                    outs[j] = layer(sample_inp, attention_mask=sample_attention)[0]
+                else:
+                    outs[j] = layer(sample_inp, attention_mask=sample_attention, position_ids=sample_position_ids)[0]
+        # 这里可以将 outs 移回 CPU（如果需要）
+        inps = outs.cpu()
     model.config.use_cache = use_cache 
     torch.cuda.empty_cache()
 
