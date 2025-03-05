@@ -598,7 +598,7 @@ def ww_sparsity_llama_7b_split(args, model, device=torch.device("cuda:0"),
     
     # ------------------ 最终组合 ------------------
     # 最终剪枝比例由 ESD 部分与 grad 部分按权重加权组合（例如：0.8*ESD + 0.2*grad）
-    final_pruning_ratios = 0.9 * np.array(layerwise_pruning_ratios_esd) + 0.1 * grad_part
+    final_pruning_ratios = weight_esd * np.array(layerwise_pruning_ratios_esd) + (1-weight_esd) * grad_part
     print("🔥 最终剪枝比例:", final_pruning_ratios)
     print("all mean: ", np.mean(final_pruning_ratios))
     return final_pruning_ratios
