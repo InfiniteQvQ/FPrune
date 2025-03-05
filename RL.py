@@ -15,18 +15,18 @@ import warnings
 # Calibration 函数：在 CPU 上创建校准数据
 def prepare_calibration_input(model, dataloader, device, nsamples):
     layers = model.model.layers
-    init_device = "cpu"
+    init_device = "cpu"  # 先在 CPU 上创建数据
     dtype = next(iter(model.parameters())).dtype
-    inps = torch.zeros((nsamples, model.seqlen, model.config.hidden_size),
-                       dtype=dtype, device=init_device)
+    inps = torch.zeros((nsamples, model.seqlen, model.config.hidden_size), dtype=dtype, device=init_device)
     inps.requires_grad = False
     cache = {'i': 0, 'attention_mask': None, "position_ids": None}
+
     class Catcher(nn.Module):
         def __init__(self, module):
             super().__init__()
             self.module = module
         def forward(self, inp, **kwargs):
-            inps[cache['i']] = inp.cpu()
+            inps[cache['i']] = inp.cpu()  # 保存到 CPU
             cache['i'] += 1
             cache['attention_mask'] = kwargs['attention_mask']
             cache['position_ids'] = kwargs.get('position_ids', None)
@@ -48,10 +48,10 @@ def prepare_calibration_input_opt(model, dataloader, device, nsamples):
     layers = model.model.decoder.layers
     init_device = "cpu"
     dtype = next(iter(model.parameters())).dtype
-    inps = torch.zeros((nsamples, model.seqlen, model.config.hidden_size),
-                       dtype=dtype, device=init_device)
+    inps = torch.zeros((nsamples, model.seqlen, model.config.hidden_size), dtype=dtype, device=init_device)
     inps.requires_grad = False
     cache = {'i': 0, 'attention_mask': None}
+    
     class Catcher(nn.Module):
         def __init__(self, module):
             super().__init__()
@@ -80,15 +80,13 @@ def find_layers(module, layers=[nn.Linear], name=''):
         return {name: module}
     res = {}
     for name1, child in module.named_children():
-        res.update(find_layers(child, layers=layers,
-                               name=name + '.' + name1 if name != '' else name1))
+        res.update(find_layers(child, layers=layers, name=name + '.' + name1 if name != '' else name1))
     return res
 
 def return_given_alpha(alpha, sort_res, W_metric, tmp_metric, sum_before):
     thres_cumsum = sum_before * alpha 
     sort_mask = tmp_metric <= thres_cumsum.reshape((-1,1))
-    thres = torch.gather(sort_res[0], dim=1,
-                         index=sort_mask.sum(dim=1, keepdims=True)-1)
+    thres = torch.gather(sort_res[0], dim=1, index=sort_mask.sum(dim=1, keepdims=True)-1)
     W_mask = (W_metric <= thres)
     cur_sparsity = (W_mask==True).sum() / W_mask.numel()
     return W_mask, cur_sparsity
@@ -109,9 +107,8 @@ def prune_wanda_ww_cached(args, model, tokenizer, device, prune_ratios, cal_data
         layers = model.model.decoder.layers
     else:
         layers = model.model.layers
-    layer_num = len(find_layers(layers))
     if res is None:
-        res = np.array([args.sparsity_ratio for _ in range(layer_num * 7)])
+        res = np.array([args.sparsity_ratio for _ in range(len(find_layers(layers))*7)])
     
     k = 0
     for i in range(len(layers)):
@@ -132,7 +129,8 @@ def prune_wanda_ww_cached(args, model, tokenizer, device, prune_ratios, cal_data
         handles = []
         for name in wrapped_layers:
             handles.append(subset[name].register_forward_hook(add_batch(name)))
-        for j in range(args.nsamples):
+        # 为减少内存，每次仅处理 1 个样本（如果 nsamples=1，则降低内存占用）
+        for j in range(inps.shape[0]):
             with torch.no_grad():
                 sample_inp = inps[j].unsqueeze(0).to(dev)
                 sample_attention = attention_mask.to(dev)
@@ -153,10 +151,10 @@ def prune_wanda_ww_cached(args, model, tokenizer, device, prune_ratios, cal_data
             if args.use_variant:
                 sort_res = torch.sort(W_metric, dim=-1, stable=True)
                 tmp_metric = torch.cumsum(sort_res[0], dim=1)
-                sum_before = W_metric.sum(dim=1)
+                sum_before_val = W_metric.sum(dim=1)
                 alpha = 0.4
                 alpha_hist = [0., 0.8]
-                W_mask, cur_sparsity = return_given_alpha(alpha, sort_res, W_metric, tmp_metric, sum_before)
+                W_mask, cur_sparsity = return_given_alpha(alpha, sort_res, W_metric, tmp_metric, sum_before_val)
                 while (torch.abs(cur_sparsity - args.sparsity_ratio) > 0.001) and (alpha_hist[1]-alpha_hist[0] >= 0.001):
                     if cur_sparsity > args.sparsity_ratio:
                         alpha_new = (alpha + alpha_hist[0]) / 2.0
@@ -165,7 +163,7 @@ def prune_wanda_ww_cached(args, model, tokenizer, device, prune_ratios, cal_data
                         alpha_new = (alpha + alpha_hist[1]) / 2.0
                         alpha_hist[0] = alpha
                     alpha = alpha_new 
-                    W_mask, cur_sparsity = return_given_alpha(alpha, sort_res, W_metric, tmp_metric, sum_before)
+                    W_mask, cur_sparsity = return_given_alpha(alpha, sort_res, W_metric, tmp_metric, sum_before_val)
                 print(f"alpha found {alpha} sparsity {cur_sparsity:.6f}")
             else:
                 sort_res = torch.sort(W_metric, dim=-1, stable=True)
@@ -173,7 +171,7 @@ def prune_wanda_ww_cached(args, model, tokenizer, device, prune_ratios, cal_data
                 k += 1
                 W_mask.scatter_(1, indices, True)
             subset[name].weight.data[W_mask] = 0
-        for j in range(args.nsamples):
+        for j in range(inps.shape[0]):
             with torch.no_grad():
                 sample_inp = inps[j].unsqueeze(0).to(dev)
                 sample_attention = attention_mask.to(dev)
@@ -190,7 +188,7 @@ def prune_wanda_ww_cached(args, model, tokenizer, device, prune_ratios, cal_data
     torch.cuda.empty_cache()
 
 #############################################
-# RL 环境：每个 episode 重新加载模型，并预先加载校准数据，RL 仅调整参数
+# RL 环境：每个 episode 重新加载模型，并预先加载好校准数据，RL 仅调整参数
 class PruningEnv(gym.Env):
     """
     RL 环境：
@@ -256,7 +254,7 @@ if __name__ == "__main__":
     parser.add_argument('--sparsity_ratio', type=float, default=0.7, help="目标剪枝比例")
     parser.add_argument('--prune_method', type=str, default="wanda_ww", help="剪枝方法")
     parser.add_argument('--epsilon', type=float, default=0.2, help="剪枝比例的微调范围")
-    parser.add_argument('--nsamples', type=int, default=10, help="校准样本数")
+    parser.add_argument('--nsamples', type=int, default=1, help="校准样本数")  # 尝试用更小的 nsamples
     parser.add_argument('--seed', type=int, default=42, help="随机种子")
     parser.add_argument('--use_variant', action='store_true', help="是否使用 Wanda variant 剪枝")
     args = parser.parse_args()
@@ -265,7 +263,7 @@ if __name__ == "__main__":
     torch.manual_seed(args.seed)
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    # 定义模型加载函数，每次返回新模型
+    # 定义模型加载函数，供 RL 环境调用，每次返回新模型
     model_loader = lambda: AutoModelForCausalLM.from_pretrained(
         args.model, cache_dir=args.cache_dir, device_map="auto", torch_dtype=torch.float16
     )
@@ -306,7 +304,8 @@ if __name__ == "__main__":
     
     # 创建 RL 环境：每个 episode 重新加载模型和预先加载校准数据
     env = PruningEnv(model_loader, esd_ratios, importance_scores, args, tokenizer, device, inputs, base_loss)
-    model_rl = PPO("MlpPolicy", env, verbose=1, device='cpu')  # 用 CPU 训练策略网络
+    # 让 PPO 的策略网络在 CPU 上运行，避免额外 GPU 占用
+    model_rl = PPO("MlpPolicy", env, verbose=1, device='cpu')
     model_rl.learn(total_timesteps=5000)
     
     best_action = model_rl.predict(env.reset())[0]
