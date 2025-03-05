@@ -561,33 +561,40 @@ def ww_sparsity_llama_7b_split(args, model, device=torch.device("cuda:0"),
     seg_importance_raw = np.array([37.25, 10.25, 0.8398, 0.5781, 0.2174, 0.1138,
                                    0.1027, 0.0973, 0.0944, 0.0933, 0.0933, 0.0737,
                                    0.0708, 0.0199], dtype=np.float32)
-    # 先对各段重要性做 min-max 归一化（得到 0~1 之间的值）
-    seg_importance_norm = (seg_importance_raw - seg_importance_raw.min()) / (seg_importance_raw.max() - seg_importance_raw.min() + eps)
-    # 为 32 层赋值：每层的归一化重要性取决于它所属的分段
+    eps = 1e-8  # 避免 log(0)
+    seg_importance_norm = np.log1p(seg_importance_raw)  # 计算 log(1 + x)
+    seg_importance_norm = (seg_importance_norm - seg_importance_norm.min()) / (seg_importance_norm.max() - seg_importance_norm.min() + eps)
+
+    # 重新赋值重要性
     layer_importance = np.zeros(32, dtype=np.float32)
     for seg_id, layer_list in segments.items():
         for layer_idx in layer_list:
             layer_importance[layer_idx] = seg_importance_norm[seg_id]
-    print("Normalized layer importance per layer:", layer_importance)
 
-    # 对 layer_importance 再进行线性变换，保证最终 (1 - new_importance) 作为剪枝倾向：
-    # 使得平均 (1 - new_importance) = 0.7，且最大不超过 1
-    # 当取 I_new = a * layer_importance + b 时，我们要求：
-    #   当 layer_importance 最小（通常为0）时，1 - (a*min + b) = 1  -> a*min + b = 0
-    #   同时 1 - (a*avg + b) = 0.7  -> a*avg + b = 0.3
-    # 则 a = 0.3 / (avg - min + eps)，b = - a * min
-    avg_val = np.mean(layer_importance)
-    min_val = np.min(layer_importance)
-    a = 0.3 / (avg_val - min_val + eps)
-    b = - a * min_val
-    new_importance = a * layer_importance + b
-    # 取 (1 - new_importance) 作为剪枝倾向，即重要性越高希望剪枝比例越低
-    grad_prune_tendency = 1 - new_importance
-    # 限制最大不超过 1（通常当 min 为0时，最大值即为1）
-    grad_prune_tendency = np.clip(grad_prune_tendency, 0, 1)
-    print("Transformed grad-based pruning tendency per layer, mean =", np.mean(grad_prune_tendency))
-    # 将每层的剪枝倾向复制 7 次，得到每个模块的值
-    grad_part = np.repeat(grad_prune_tendency, layer_num_in_block)
+    print("Log Scaled Normalized layer importance per layer:", layer_importance)
+    pruning_ratios = 1 - layer_importance
+
+    # 计算当前剪枝比例的均值
+    current_mean = np.mean(pruning_ratios)
+    target_mean = 0.7  # 目标剪枝比例均值
+
+    # 计算缩放因子，使得最终剪枝比例的均值为 0.7
+    scale_factor = target_mean / current_mean
+
+    # 进行缩放
+    scaled_pruning_ratios = pruning_ratios * scale_factor
+
+    # 限制范围确保剪枝比例不会超出 [0, 0.99]
+    scaled_pruning_ratios = np.clip(scaled_pruning_ratios, 0.0, 0.99)
+
+    # 计算新均值
+    new_mean = np.mean(scaled_pruning_ratios)
+
+    # 输出最终剪枝比例
+    print("🔥 调整后的剪枝比例:", scaled_pruning_ratios)
+    print("🔥 新的均值:", new_mean)
+   
+    grad_part = np.repeat(scaled_pruning_ratios, layer_num_in_block)
     
     # ------------------ 最终组合 ------------------
     # 最终剪枝比例由 ESD 部分与 grad 部分按权重加权组合（例如：0.8*ESD + 0.2*grad）
