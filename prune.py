@@ -490,7 +490,7 @@ def ww_sparsity_llama2_7b(args, model, device=torch.device("cuda:0"),
 
 def ww_sparsity_llama_7b_split(args, model, device=torch.device("cuda:0"),
                                 s1=0.8, s2=1.2, ratios=None, prune_n=0, prune_m=0,
-                                weight_esd=0.95, eps=1e-8):
+                                weight_esd=0.85, eps=1e-8):
     """
     基于 ESD 数值计算 LLaMA 7B 各层（32 层，每层 7 个模块：Q, K, V, Out, Gate, Up, Down）的剪枝比例。
     计算流程：
@@ -567,11 +567,13 @@ def ww_sparsity_llama_7b_split(args, model, device=torch.device("cuda:0"),
         for layer_idx in layer_list:
             layer_importance[layer_idx] = seg_importance_raw[seg_id]
 
-    # 赋值后再归一化
-    layer_importance = np.log1p(layer_importance)
+    # -------------------------- 再归一化 --------------------------
+    # 对赋值后的重要性先进行对数变换，再进行 min-max 归一化到 [0, 1] 范围内
+    layer_importance = np.log1p(layer_importance)  # 计算 log(1 + x)
     layer_importance = (layer_importance - layer_importance.min()) / (layer_importance.max() - layer_importance.min() + eps)
 
-    print("Log Scaled Normalized layer importance per layer:", layer_importance)
+    print("Log Scaled Normalized layer importance per layer:")
+    print(layer_importance)
     pruning_ratios = 1 - layer_importance
 
     # 计算当前剪枝比例的均值
