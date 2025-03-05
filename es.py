@@ -44,13 +44,13 @@ def get_llm(model_path, cache_dir="llm_weights"):
 def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, prune_m=0, ratios=None):
     use_cache = model.config.use_cache 
     model.config.use_cache = False 
-    
+
     res = []
     for i in ratios:
         for j in range(7):
             res.append(i)
     ratios = np.array(res)
-
+    print(ratios)
 
     print("loading calibdation data")
     dataloader, _ = get_loaders("c4",nsamples=args.nsamples,seed=args.seed,seqlen=model.seqlen,tokenizer=tokenizer)
@@ -276,53 +276,53 @@ class LayerPruningOptimization:
 
 
 # ========== 3. 进化策略 (ES) ==========
+from tqdm import tqdm
+import sys
+
 class EvolutionStrategy:
     def __init__(self, env, population_size=20, sigma=0.1, alpha=0.02, generations=50):
         self.env = env
-        self.population_size = population_size  # 生成的随机个体数量
-        self.sigma = sigma  # 噪声标准差
-        self.alpha = alpha  # 学习率
+        self.population_size = population_size
+        self.sigma = sigma
+        self.alpha = alpha
         self.generations = generations
-        self.num_layers = env.num_layers  # 32层
+        self.num_layers = env.num_layers
 
     def optimize(self):
         """ 运行进化策略进行优化 """
-        weights = np.random.rand(self.num_layers)  # 初始化 32 层的混合比例 [0,1] 之间
+        weights = np.random.rand(self.num_layers)
         best_loss = float("inf")
         best_weights = weights
 
-        print("🚀 开始 RL 训练")
-        progress_bar = tqdm(range(self.generations), desc="Training Progress")
+        print("🚀 开始 RL 训练", flush=True)
+        progress_bar = tqdm(range(self.generations), desc="Training Progress", file=sys.stdout, ascii=True)
 
         for gen in progress_bar:
-            noise = np.random.randn(self.population_size, self.num_layers)  # 生成噪声
-            population = weights + self.sigma * noise  # 生成新种群
+            noise = np.random.randn(self.population_size, self.num_layers)
+            population = weights + self.sigma * noise
 
             rewards = np.zeros(self.population_size)
             for i in range(self.population_size):
                 loss, _ = self.env.evaluate_loss(population[i])
-                rewards[i] = -loss  # 目标是最小化 loss，奖励取负数
-                torch.cuda.empty_cache()  # 防止显存溢出
+                rewards[i] = -loss  # 目标是最小化 loss
+                torch.cuda.empty_cache()
 
-            # 计算梯度方向
             rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
             gradient = np.dot(noise.T, rewards) / self.population_size
-
-            # 更新权重
             weights += self.alpha * gradient
 
-            # 记录最佳 loss
             loss, final_weights = self.env.evaluate_loss(weights)
             if loss < best_loss:
                 best_loss = loss
                 best_weights = final_weights
 
-            # 更新 tqdm 进度条信息
             progress_bar.set_postfix({"Best Loss": f"{best_loss:.6f}"})
+            progress_bar.refresh()
 
-            print(f"🌀 Generation {gen+1}/{self.generations} | Loss: {loss:.6f} | Best Loss: {best_loss:.6f}")
+            tqdm.write(f"🌀 Generation {gen+1}/{self.generations} | Loss: {loss:.6f} | Best Loss: {best_loss:.6f}")
 
         return best_weights, best_loss
+
 
 # ========== 4. 运行优化 ==========
 if __name__ == "__main__":
