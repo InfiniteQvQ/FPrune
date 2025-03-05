@@ -253,7 +253,7 @@ class PruningEnv(gym.Env):
         self.observation_space = gym.spaces.Box(low=0.0, high=1.0, shape=(self.num_layers * 2,), dtype=np.float32)
 
     def reset(self):
-        # 恢复模型为初始状态（不调用 .to() 避免 accelerate hooks 问题）
+        # 恢复模型为初始状态
         self.model.load_state_dict(self.initial_state)
         self.esd_weights = np.ones(self.num_layers) * 0.8
         return np.concatenate([self.esd_ratios, self.importance_scores])
@@ -290,6 +290,10 @@ if __name__ == "__main__":
     model = AutoModelForCausalLM.from_pretrained(args.model, cache_dir=args.cache_dir, device_map="auto", torch_dtype=torch.float16)
     tokenizer_name = "HuggingFaceM4/llama-7b-tokenizer"
     tokenizer = LlamaTokenizer.from_pretrained(tokenizer_name)
+
+    # 如果模型没有 seqlen 属性，则使用配置中的 max_position_embeddings 作为序列长度
+    if not hasattr(model, 'seqlen'):
+        model.seqlen = model.config.max_position_embeddings
 
     dataset = load_dataset("roneneldan/TinyStories", split="train")
     sample_texts = [dataset[i]["text"] for i in range(100)]
