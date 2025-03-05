@@ -223,7 +223,8 @@ class PruningEnv(gym.Env):
         # 预先加载数据集，用于 loss 评估
         dataset = load_dataset("roneneldan/TinyStories", split="train")
         sample_texts = [dataset[i]["text"] for i in range(100)]
-        tokenizer = LlamaTokenizer.from_pretrained(self.model_path)
+        tokenizer_name = "HuggingFaceM4/llama-7b-tokenizer"
+        tokenizer = LlamaTokenizer.from_pretrained(tokenizer_name)
         inputs = tokenizer(sample_texts, return_tensors="pt", padding=True,
                            truncation=True, max_length=256)
         self.inputs = {k: v for k, v in inputs.items()}  # 注意：后面会移至模型 device
@@ -266,7 +267,7 @@ if __name__ == "__main__":
     model = get_llm(model_path, cache_dir)
     tokenizer_name = "HuggingFaceM4/llama-7b-tokenizer"
     tokenizer = LlamaTokenizer.from_pretrained(tokenizer_name)
-    tokenizer.pad_token = tokenizer.eos_token
+ 
 
     dataset = load_dataset("roneneldan/TinyStories", split="train")
     sample_texts = [dataset[i]["text"] for i in range(100)]
