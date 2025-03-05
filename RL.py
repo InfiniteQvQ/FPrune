@@ -84,25 +84,26 @@ def prepare_calibration_input_opt(model, dataloader, device, nsamples):
 #############################################
 # 工具函数
 def find_layers(module, layers=[nn.Linear], name=''):
+    """
+    递归查找模块中指定类型的层
+    """
     if type(module) in layers:
         return {name: module}
     res = {}
     for name1, child in module.named_children():
-        res.update(find_layers(child, layers=layers,
-                               name=name + '.' + name1 if name != '' else name1))
+        res.update(find_layers(child, layers=layers, name=name + '.' + name1 if name != '' else name1))
     return res
 
 def return_given_alpha(alpha, sort_res, W_metric, tmp_metric, sum_before):
     thres_cumsum = sum_before * alpha 
     sort_mask = tmp_metric <= thres_cumsum.reshape((-1,1))
-    thres = torch.gather(sort_res[0], dim=1,
-                         index=sort_mask.sum(dim=1, keepdims=True)-1)
+    thres = torch.gather(sort_res[0], dim=1, index=sort_mask.sum(dim=1, keepdims=True)-1)
     W_mask = (W_metric <= thres)
     cur_sparsity = (W_mask==True).sum() / W_mask.numel()
     return W_mask, cur_sparsity
 
 #############################################
-# Wanda 剪枝函数——修改版本，接收预加载好的校准数据 cal_data
+# Wanda 剪枝函数（使用预加载的校准数据）
 def prune_wanda_ww_cached(args, model, tokenizer, device, prune_ratios, cal_data):
     """
     使用预加载的校准数据 (inps, outs, attention_mask, position_ids)
@@ -116,7 +117,6 @@ def prune_wanda_ww_cached(args, model, tokenizer, device, prune_ratios, cal_data
         for i in range(7):
             res.append(j)
     res = np.array(res)
-    # 直接调用下面的剪枝逻辑，不再重新加载校准数据
     inps, outs, attention_mask, position_ids = cal_data
     print("inps", inps.shape)
     if "OPT" in model.__class__.__name__:
@@ -164,29 +164,28 @@ def prune_wanda_ww_cached(args, model, tokenizer, device, prune_ratios, cal_data
             print(f"pruning layer {i} name {name}")
             W_metric = torch.abs(subset[name].weight.data) * torch.sqrt(wrapped_layers[name].scaler_row.reshape((1, -1)))
             W_mask = (torch.zeros_like(W_metric) == 1)
-            if args.prune_method == "wanda_ww":
-                if args.use_variant:
-                    sort_res = torch.sort(W_metric, dim=-1, stable=True)
-                    tmp_metric = torch.cumsum(sort_res[0], dim=1)
-                    sum_before = W_metric.sum(dim=1)
-                    alpha = 0.4
-                    alpha_hist = [0., 0.8]
+            if args.use_variant:
+                sort_res = torch.sort(W_metric, dim=-1, stable=True)
+                tmp_metric = torch.cumsum(sort_res[0], dim=1)
+                sum_before = W_metric.sum(dim=1)
+                alpha = 0.4
+                alpha_hist = [0., 0.8]
+                W_mask, cur_sparsity = return_given_alpha(alpha, sort_res, W_metric, tmp_metric, sum_before)
+                while (torch.abs(cur_sparsity - args.sparsity_ratio) > 0.001) and (alpha_hist[1]-alpha_hist[0] >= 0.001):
+                    if cur_sparsity > args.sparsity_ratio:
+                        alpha_new = (alpha + alpha_hist[0]) / 2.0
+                        alpha_hist[1] = alpha
+                    else:
+                        alpha_new = (alpha + alpha_hist[1]) / 2.0
+                        alpha_hist[0] = alpha
+                    alpha = alpha_new 
                     W_mask, cur_sparsity = return_given_alpha(alpha, sort_res, W_metric, tmp_metric, sum_before)
-                    while (torch.abs(cur_sparsity - args.sparsity_ratio) > 0.001) and (alpha_hist[1]-alpha_hist[0] >= 0.001):
-                        if cur_sparsity > args.sparsity_ratio:
-                            alpha_new = (alpha + alpha_hist[0]) / 2.0
-                            alpha_hist[1] = alpha
-                        else:
-                            alpha_new = (alpha + alpha_hist[1]) / 2.0
-                            alpha_hist[0] = alpha
-                        alpha = alpha_new 
-                        W_mask, cur_sparsity = return_given_alpha(alpha, sort_res, W_metric, tmp_metric, sum_before)
-                    print(f"alpha found {alpha} sparsity {cur_sparsity:.6f}")
-                else:
-                    sort_res = torch.sort(W_metric, dim=-1, stable=True)
-                    indices = sort_res[1][:, :int(W_metric.shape[1]*res[k])]
-                    k += 1
-                    W_mask.scatter_(1, indices, True)
+                print(f"alpha found {alpha} sparsity {cur_sparsity:.6f}")
+            else:
+                sort_res = torch.sort(W_metric, dim=-1, stable=True)
+                indices = sort_res[1][:, :int(W_metric.shape[1]*res[k])]
+                k += 1
+                W_mask.scatter_(1, indices, True)
             subset[name].weight.data[W_mask] = 0
         for j in range(args.nsamples):
             with torch.no_grad():
@@ -205,14 +204,14 @@ def prune_wanda_ww_cached(args, model, tokenizer, device, prune_ratios, cal_data
     torch.cuda.empty_cache()
 
 #############################################
-# RL 环境：每个 episode 重新加载模型，且预先加载好校准数据，RL 仅调整参数
+# RL 环境：每个 episode 重新加载模型，并预先加载好校准数据，RL 仅调整参数
 class PruningEnv(gym.Env):
     """
     RL 环境：
-      - 每个 episode 从原始模型状态开始（通过 model_loader 重新加载）。
-      - 同时在 reset() 中预先加载校准数据，保存在 self.cal_data。
-      - 动作为每层的剪枝比例权重（用于融合 ESD 和 GradNorm）。
-      - 在 step() 中调用 prune_wanda_ww_cached()（即实际 Wanda 剪枝），然后计算模型 loss 作为 reward。
+      - 每个 episode 重新加载模型（通过 model_loader）。
+      - 在 reset() 中预先加载校准数据并缓存到 self.cal_data。
+      - RL 动作为每层的 ESD 权重（用于融合 ESD 和 GradNorm）。
+      - 在 step() 中调用 prune_wanda_ww_cached()，然后计算剪枝后模型 loss 作为 reward。
     """
     def __init__(self, model_loader, esd_ratios, importance_scores, args, tokenizer, device, inputs, base_loss):
         super(PruningEnv, self).__init__()
@@ -227,13 +226,15 @@ class PruningEnv(gym.Env):
         self.base_loss = base_loss
         self.action_space = gym.spaces.Box(low=0.0, high=1.0, shape=(self.num_layers,), dtype=np.float32)
         self.observation_space = gym.spaces.Box(low=0.0, high=1.0, shape=(self.num_layers*2,), dtype=np.float32)
-        # 在 reset() 中加载模型后，再加载校准数据并缓存
         self.cal_data = None
 
     def reset(self):
         # 重新加载模型
         self.model = self.model_loader()
-        # 加载校准数据一次，并缓存在 self.cal_data
+        # 如果模型没有 seqlen，则设置
+        if not hasattr(self.model, 'seqlen'):
+            self.model.seqlen = self.model.config.max_position_embeddings
+        # 预先加载校准数据一次，并缓存
         dataloader, _ = get_loaders("c4", nsamples=self.args.nsamples,
                                     seed=self.args.seed, seqlen=self.model.seqlen,
                                     tokenizer=self.tokenizer)
@@ -248,7 +249,7 @@ class PruningEnv(gym.Env):
         # RL 动作：每层的 ESD 权重
         esd_weights = np.clip(action, 0.0, 1.0)
         final_pruning_ratios = esd_weights * self.esd_ratios + (1 - esd_weights) * self.importance_scores
-        # 调用实际 Wanda 剪枝函数，使用缓存的校准数据
+        # 调用 Wanda 剪枝，使用预加载的校准数据
         prune_wanda_ww_cached(self.args, self.model, self.tokenizer, self.device,
                                 prune_ratios=final_pruning_ratios, cal_data=self.cal_data)
         with torch.no_grad():
@@ -258,7 +259,6 @@ class PruningEnv(gym.Env):
         reward = -loss_increase
         done = True
         obs = np.concatenate([self.esd_ratios, self.importance_scores])
-        # 可选：释放模型与校准数据，防止内存累积
         del self.model
         del self.cal_data
         torch.cuda.empty_cache()
@@ -284,7 +284,7 @@ if __name__ == "__main__":
     torch.manual_seed(args.seed)
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    # 定义模型加载函数，供 RL 环境每次调用（每次返回新模型）
+    # 定义模型加载函数，供 RL 环境调用，每次返回新模型
     model_loader = lambda: AutoModelForCausalLM.from_pretrained(
         args.model, cache_dir=args.cache_dir, device_map="auto", torch_dtype=torch.float16
     )
@@ -306,7 +306,6 @@ if __name__ == "__main__":
         base_loss = outputs.loss.item()
     print(f"🚀 剪枝前 LLaMA-7B 在 TinyStories Loss: {base_loss:.6f}")
     
-    # 示例的 ESD 剪枝比例与 GradNorm（或其他指标）
     esd_ratios = np.array([
         0.57042164, 0.61759788, 0.63153112, 0.63073802, 0.65285629, 0.6482451,
         0.63005912, 0.5921672,  0.59738964, 0.56803465, 0.58708227, 0.58937198,
@@ -324,7 +323,7 @@ if __name__ == "__main__":
         0.7545204,  0.764797
     ])
     
-    # 创建 RL 环境：RL 只调整参数，每次 episode 重新加载模型和预先加载校准数据
+    # 创建 RL 环境：每个 episode 重新加载模型和预先加载校准数据
     env = PruningEnv(model_loader, esd_ratios, importance_scores, args, tokenizer, device, inputs, base_loss)
     model_rl = PPO("MlpPolicy", env, verbose=1)
     model_rl.learn(total_timesteps=5000)
