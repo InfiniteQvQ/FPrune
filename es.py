@@ -235,6 +235,16 @@ def prepare_calibration_input_opt(model, dataloader, device):
     attention_mask = cache['attention_mask']
 
     return inps, outs, attention_mask, None
+def calculate_sparsity(model):
+    total_params = 0
+    zero_params = 0
+    for name, param in model.named_parameters():
+        if "weight" in name:  # 只计算权重，不计算 bias
+            total_params += param.numel()
+            zero_params += (param == 0).sum().item()
+    sparsity = zero_params / total_params
+    print(f"📉 Model Sparsity: {sparsity:.4f} ({zero_params}/{total_params} zero values)")
+    return sparsity
 # ========== 2. 定义剪枝环境 ==========
 class LayerPruningOptimization:
     def __init__(self, model_path, cache_dir, dataset, tokenizer, esd_ratios, importance_scores, args):
@@ -269,13 +279,12 @@ class LayerPruningOptimization:
     
 
         try:
-            # 剪枝
-            print("🔍 Before Pruning (First 5 weights):", model.state_dict()["model.layers.0.self_attn.q_proj.weight"].view(-1)[:5])
+            print("🔍 Before Pruning:")
+            calculate_sparsity(model)
             prune_wanda(self.args, model, self.tokenizer, self.device, ratios=layer_weights)
-            pruned_model = get_llm(self.model_path, self.cache_dir)
-            pruned_model.load_state_dict(torch.load("pruned_model.pth", map_location="cuda:0"))
-            pruned_model.to("cuda:0")
-            print("🔍 After Loading - Layer 0 First 5 Weights:", pruned_model.state_dict()["model.layers.0.self_attn.q_proj.weight"].view(-1)[:5])
+            print("🔍 After Pruning:")
+            calculate_sparsity(model)
+            
 
             # 评估剪枝后 loss
             sample_texts = [self.dataset[i]["text"] for i in range(100)]
