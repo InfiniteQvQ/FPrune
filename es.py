@@ -49,7 +49,7 @@ def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0
         for j in range(7):
             res.append(i)
     ratios = np.array(res)
-    print(ratios)
+    #print(ratios)
     #print("loading calibdation data")
     dataloader, _ = get_loaders("c4",nsamples=args.nsamples,seed=args.seed,seqlen=model.seqlen,tokenizer=tokenizer)
     #print("dataset loading complete")
@@ -322,7 +322,7 @@ class EvolutionStrategy:
 
     def optimize(self):
         """ 运行进化策略进行优化 """
-        weights = np.random.rand(self.num_layers)
+        weights = 0.8 * self.env.esd_ratios + 0.2 * self.env.importance_scores
         best_loss = float("inf")
         best_weights = weights
 
@@ -408,7 +408,7 @@ if __name__ == "__main__":
     env = LayerPruningOptimization(model_path, cache_dir, dataset, tokenizer, esd_ratios, importance_scores, args)
     print("env done")
     # 运行进化策略优化
-    es = EvolutionStrategy(env, population_size=10, sigma=0.1, alpha=0.02, generations=5)
+    es = EvolutionStrategy(env, population_size=5, sigma=0.1, alpha=0.07, generations=5)
     
     best_weights, best_loss = es.optimize()
 
