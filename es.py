@@ -8,6 +8,7 @@ from transformers import LlamaTokenizer
 from scipy.stats import norm
 from lib.data import get_loaders
 from lib.layerwrapper import WrappedGPT
+from tqdm import tqdm
 
 # ========== 1. 获取 LLM 模型 ==========
 # 工具函数：递归查找指定类型的层
@@ -36,6 +37,8 @@ def get_llm(model_path, cache_dir):
 def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, prune_m=0, ratios=None):
     use_cache = model.config.use_cache 
     model.config.use_cache = False 
+    seqlen = getattr(model.config, "seqlen", getattr(model.config, "max_position_embeddings", 2048))
+
 
     print("loading calibdation data")
     dataloader, _ = get_loaders("c4",nsamples=args.nsamples,seed=args.seed,seqlen=model.seqlen,tokenizer=tokenizer)
@@ -276,7 +279,10 @@ class EvolutionStrategy:
         best_loss = float("inf")
         best_weights = weights
 
-        for gen in range(self.generations):
+        print("🚀 开始 RL 训练")
+        progress_bar = tqdm(range(self.generations), desc="Training Progress")
+
+        for gen in progress_bar:
             noise = np.random.randn(self.population_size, self.num_layers)  # 生成噪声
             population = weights + self.sigma * noise  # 生成新种群
 
@@ -284,6 +290,7 @@ class EvolutionStrategy:
             for i in range(self.population_size):
                 loss, _ = self.env.evaluate_loss(population[i])
                 rewards[i] = -loss  # 目标是最小化 loss，奖励取负数
+                torch.cuda.empty_cache()  # 防止显存溢出
 
             # 计算梯度方向
             rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
@@ -298,7 +305,10 @@ class EvolutionStrategy:
                 best_loss = loss
                 best_weights = final_weights
 
-            print(f"Generation {gen+1}/{self.generations} - Loss: {loss:.6f}")
+            # 更新 tqdm 进度条信息
+            progress_bar.set_postfix({"Best Loss": f"{best_loss:.6f}"})
+
+            print(f"🌀 Generation {gen+1}/{self.generations} | Loss: {loss:.6f} | Best Loss: {best_loss:.6f}")
 
         return best_weights, best_loss
 
