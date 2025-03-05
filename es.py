@@ -282,6 +282,10 @@ class LayerPruningOptimization:
 
     def evaluate_loss(self, weights):
         """计算当前 `weights` (混合比例) 下剪枝后模型的 loss"""
+
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
+
         weights_np = weights.cpu().numpy() if isinstance(weights, torch.Tensor) else weights  # 确保是 NumPy 数组
 
         esd_contrib = self.esd_ratios * weights_np
@@ -313,8 +317,10 @@ class LayerPruningOptimization:
             # 释放模型
             del model
             torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
 
         return loss, layer_weights
+
 
 
 
@@ -392,7 +398,7 @@ if __name__ == "__main__":
     parser.add_argument('--model', type=str, default="pinkmanlove/llama-7b-hf")
     parser.add_argument('--cache_dir', type=str, default="/root/autodl-tmp/llm_weights")
     parser.add_argument('--sparsity_ratio', type=float, default=0.7)
-    parser.add_argument('--nsamples', type=int, default=32)
+    parser.add_argument('--nsamples', type=int, default=8)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--use_variant', action='store_true')
     args = parser.parse_args()
