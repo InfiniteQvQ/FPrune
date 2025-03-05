@@ -40,7 +40,6 @@ def prepare_calibration_input(model, dataloader, device, nsamples):
                        dtype=dtype, device=init_device)
     inps.requires_grad = False
     cache = {'i': 0, 'attention_mask': None, "position_ids": None}
-
     class Catcher(nn.Module):
         def __init__(self, module):
             super().__init__()
@@ -74,7 +73,6 @@ def prepare_calibration_input_opt(model, dataloader, device, nsamples):
                        dtype=dtype, device=init_device)
     inps.requires_grad = False
     cache = {'i': 0, 'attention_mask': None}
-    
     class Catcher(nn.Module):
         def __init__(self, module):
             super().__init__()
@@ -104,13 +102,15 @@ def find_layers(module, layers=[nn.Linear], name=''):
         return {name: module}
     res = {}
     for name1, child in module.named_children():
-        res.update(find_layers(child, layers=layers, name=name + '.' + name1 if name != '' else name1))
+        res.update(find_layers(child, layers=layers,
+                               name=name + '.' + name1 if name != '' else name1))
     return res
 
 def return_given_alpha(alpha, sort_res, W_metric, tmp_metric, sum_before):
     thres_cumsum = sum_before * alpha 
     sort_mask = tmp_metric <= thres_cumsum.reshape((-1,1))
-    thres = torch.gather(sort_res[0], dim=1, index=sort_mask.sum(dim=1, keepdims=True)-1)
+    thres = torch.gather(sort_res[0], dim=1,
+                         index=sort_mask.sum(dim=1, keepdims=True)-1)
     W_mask = (W_metric <= thres)
     cur_sparsity = (W_mask==True).sum() / W_mask.numel()
     return W_mask, cur_sparsity
@@ -241,11 +241,12 @@ def evaluate_pruning(pruning_params, args, model_path, cache_dir, tokenizer, inp
 
 #############################################
 # 定义一个回调函数跟踪训练进度
-
 class ProgressCallback(BaseCallback):
     def __init__(self, verbose=0):
         super(ProgressCallback, self).__init__(verbose)
         self.episode_count = 0
+    def _on_step(self) -> bool:
+        return True
     def _on_rollout_end(self) -> None:
         self.episode_count += 1
         print(f"Rollout {self.episode_count} finished at step {self.num_timesteps}.", flush=True)
