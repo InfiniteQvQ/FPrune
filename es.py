@@ -51,7 +51,7 @@ def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0
     for i in ratios:
         for j in range(7):
             res.append(i)
-    ratios = np.array(res)
+    ratios = np.array([i.cpu().numpy() if isinstance(i, torch.Tensor) else i for i in res])
 
 
     #print(ratios)
