@@ -42,6 +42,9 @@ def get_llm(model_path, cache_dir="llm_weights"):
     return model
 
 def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, prune_m=0, ratios=None):
+    # 确保计算的数据都在 model.device
+    device = model.device
+    
     use_cache = model.config.use_cache 
     model.config.use_cache = False 
     res = []
@@ -49,6 +52,7 @@ def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0
         for j in range(7):
             res.append(i)
     ratios = np.array(res)
+    ratios = torch.tensor(ratios, dtype=torch.float32, device=device)
     #print(ratios)
     #print("loading calibdation data")
     dataloader, _ = get_loaders("c4",nsamples=args.nsamples,seed=args.seed,seqlen=model.seqlen,tokenizer=tokenizer)
@@ -285,26 +289,37 @@ class LayerPruningOptimization:
         model = get_llm(self.model_path, self.cache_dir)
 
         try:
+            # ✅ 确保 `layer_weights` 在 `model.device`（防止多 GPU 设备不匹配）
+            device = model.device
+            layer_weights = torch.tensor(layer_weights, dtype=torch.float32, device=device)
+
             # 剪枝
-            prune_wanda(self.args, model, self.tokenizer, self.device, ratios=layer_weights)
+            prune_wanda(self.args, model, self.tokenizer, device, ratios=layer_weights)
 
             # 评估剪枝后 loss
             sample_texts = [self.dataset[i]["text"] for i in range(100)]
             inputs = self.tokenizer(sample_texts, return_tensors="pt", padding=True, truncation=True, max_length=256)
-            inputs = {k: v.to(model.device) for k, v in inputs.items()}
+
+            # ✅ 确保 `inputs` 也在 `model.device`
+            inputs = {k: v.to(device) for k, v in inputs.items()}
 
             with torch.no_grad():
                 outputs = model(**inputs, labels=inputs["input_ids"])
                 loss = outputs.loss.item()
+
         except Exception as e:
             print(f"❌ Evaluation failed: {e}")
+            import traceback
+            traceback.print_exc()
             loss = float("inf")  # 避免异常导致 ES 失败
+
         finally:
             # 释放模型
             del model
             torch.cuda.empty_cache()
         
         return loss, layer_weights
+
 
 
 # ========== 3. 进化策略 (ES) ==========
@@ -322,7 +337,11 @@ class EvolutionStrategy:
 
     def optimize(self):
         """ 运行进化策略进行优化 """
-        weights = 0.8 * self.env.esd_ratios + 0.2 * self.env.importance_scores
+        weights = torch.tensor(
+            0.8 * self.env.esd_ratios + 0.2 * self.env.importance_scores,
+            dtype=torch.float32,
+            device=self.env.device  # ✅ 确保 weights 在正确的 GPU
+        )
         best_loss = float("inf")
         best_weights = weights
 
@@ -408,7 +427,7 @@ if __name__ == "__main__":
     env = LayerPruningOptimization(model_path, cache_dir, dataset, tokenizer, esd_ratios, importance_scores, args)
     print("env done")
     # 运行进化策略优化
-    es = EvolutionStrategy(env, population_size=5, sigma=0.1, alpha=0.07, generations=5)
+    es = EvolutionStrategy(env, population_size=2, sigma=0.1, alpha=0.07, generations=5)
     
     best_weights, best_loss = es.optimize()
 
