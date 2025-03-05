@@ -291,7 +291,8 @@ if __name__ == "__main__":
     
     # 预先加载一次模型用于 baseline 评估
     model = model_loader()
-    tokenizer = LlamaTokenizer.from_pretrained(args.model)
+    tokenizer_name = "HuggingFaceM4/llama-7b-tokenizer"
+    tokenizer = LlamaTokenizer.from_pretrained(tokenizer_name)
     if not hasattr(model, 'seqlen'):
         model.seqlen = model.config.max_position_embeddings
     
