@@ -335,25 +335,21 @@ class EvolutionStrategy:
         self.alpha = alpha
         self.generations = generations
         self.num_layers = env.num_layers
+        
+        # ✅ 解决方案：添加 self.device
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     def optimize(self):
         """ 运行进化策略进行优化 """
-        weights = torch.tensor(
-            0.8 * self.env.esd_ratios + 0.2 * self.env.importance_scores,
-            dtype=torch.float32,
-            device=self.env.device  # ✅ 确保 weights 在正确的 GPU
-        )
+        weights_np = 0.8 * self.env.esd_ratios + 0.2 * self.env.importance_scores  # 计算初始权重
         best_loss = float("inf")
-        best_weights = weights
+        best_weights = weights_np
 
         print("🚀 开始 RL 训练", flush=True)
         progress_bar = tqdm(range(self.generations), desc="Training Progress", file=sys.stdout, ascii=True)
 
         for gen in progress_bar:
             noise = np.random.randn(self.population_size, self.num_layers)  # 生成噪声
-
-            # ✅ 确保 weights 是 NumPy 数组
-            weights_np = weights.cpu().numpy() if isinstance(weights, torch.Tensor) else weights
 
             population = weights_np + self.sigma * noise  # 生成新种群
 
@@ -383,7 +379,6 @@ class EvolutionStrategy:
             print("📌 Layer Weights:", np.round(weights.cpu().numpy(), 4))  # 限制 4 位小数
             print("-" * 60)  # 让日志更清晰
 
-
             if loss < best_loss:
                 best_loss = loss
                 best_weights = final_weights
@@ -392,6 +387,7 @@ class EvolutionStrategy:
             progress_bar.refresh()
 
         return best_weights, best_loss
+
 
 
 # ========== 4. 运行优化 ==========
@@ -441,7 +437,7 @@ if __name__ == "__main__":
     env = LayerPruningOptimization(model_path, cache_dir, dataset, tokenizer, esd_ratios, importance_scores, args)
     print("env done")
     # 运行进化策略优化
-    es = EvolutionStrategy(env, population_size=2, sigma=0.1, alpha=0.07, generations=5)
+    es = EvolutionStrategy(env, population_size=1, sigma=0.1, alpha=0.07, generations=5)
     
     best_weights, best_loss = es.optimize()
 
