@@ -266,6 +266,8 @@ if __name__ == "__main__":
     model = get_llm(model_path, cache_dir)
     tokenizer_name = "HuggingFaceM4/llama-7b-tokenizer"
     tokenizer = LlamaTokenizer.from_pretrained(tokenizer_name)
+    tokenizer.pad_token = tokenizer.eos_token
+
     dataset = load_dataset("roneneldan/TinyStories", split="train")
     sample_texts = [dataset[i]["text"] for i in range(100)]
     inputs = tokenizer(sample_texts, return_tensors="pt", padding=True,
