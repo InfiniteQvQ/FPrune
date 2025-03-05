@@ -31,7 +31,7 @@ def return_given_alpha(alpha, sort_res, W_metric, tmp_metric, sum_before):
 
 def get_llm(model_path, cache_dir):
     from transformers import AutoModelForCausalLM
-    return AutoModelForCausalLM.from_pretrained(model_path, cache_dir=cache_dir).cuda()
+    return AutoModelForCausalLM.from_pretrained(model_path, cache_dir=cache_dir, device_map="auto", torch_dtype=torch.float16).cuda()
 
 def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, prune_m=0, ratios=None):
     use_cache = model.config.use_cache 
@@ -143,7 +143,7 @@ def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0
 
     model.config.use_cache = use_cache 
     torch.cuda.empty_cache()
-    
+
 def prepare_calibration_input(model, dataloader, device):
     layers = model.model.layers
 
@@ -237,22 +237,28 @@ class LayerPruningOptimization:
         # 加载 LLM 模型
         model = get_llm(self.model_path, self.cache_dir)
 
-        # 剪枝
-        prune_wanda(self.args, model, self.tokenizer, self.device, ratios=layer_weights)
+        try:
+            # 剪枝
+            prune_wanda(self.args, model, self.tokenizer, self.device, ratios=layer_weights)
 
-        # 评估剪枝后 loss
-        sample_texts = [self.dataset[i]["text"] for i in range(100)]
-        inputs = self.tokenizer(sample_texts, return_tensors="pt", padding=True, truncation=True, max_length=256)
-        inputs = {k: v.to(model.device) for k, v in inputs.items()}
+            # 评估剪枝后 loss
+            sample_texts = [self.dataset[i]["text"] for i in range(100)]
+            inputs = self.tokenizer(sample_texts, return_tensors="pt", padding=True, truncation=True, max_length=256)
+            inputs = {k: v.to(model.device) for k, v in inputs.items()}
 
-        with torch.no_grad():
-            outputs = model(**inputs, labels=inputs["input_ids"])
-            loss = outputs.loss.item()
-
-        del model
-        torch.cuda.empty_cache()
+            with torch.no_grad():
+                outputs = model(**inputs, labels=inputs["input_ids"])
+                loss = outputs.loss.item()
+        except Exception as e:
+            print(f"❌ Evaluation failed: {e}")
+            loss = float("inf")  # 避免异常导致 ES 失败
+        finally:
+            # 释放模型
+            del model
+            torch.cuda.empty_cache()
 
         return loss, layer_weights
+
 
 # ========== 3. 进化策略 (ES) ==========
 class EvolutionStrategy:
@@ -341,9 +347,10 @@ if __name__ == "__main__":
 
     # 初始化环境
     env = LayerPruningOptimization(model_path, cache_dir, dataset, tokenizer, esd_ratios, importance_scores, args)
-
+    print("env done")
     # 运行进化策略优化
     es = EvolutionStrategy(env, population_size=20, sigma=0.1, alpha=0.02, generations=50)
+    
     best_weights, best_loss = es.optimize()
 
     print("\n🔍 最优混合比例：", best_weights)
