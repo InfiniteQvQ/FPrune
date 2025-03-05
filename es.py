@@ -352,30 +352,30 @@ class EvolutionStrategy:
 
         for gen in progress_bar:
             noise = np.random.randn(self.population_size, self.num_layers)  # 生成噪声
-            population = weights.cpu().numpy() + self.sigma * noise  # 生成新种群
+
+            population = weights_np + self.sigma * noise  # 生成新种群
 
             rewards = np.zeros(self.population_size)
             for i in range(self.population_size):
-                loss, _ = self.env.evaluate_loss(population[i])
+                loss, _ = self.env.evaluate_loss(population[i])  # 计算当前个体的 loss
                 rewards[i] = -loss  # 目标是最小化 loss
                 torch.cuda.empty_cache()
 
-            print(f"🔍 Raw Rewards at Generation {gen+1}: {rewards}")
-
             rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
+            gradient = np.dot(noise.T, rewards) / self.population_size  # 计算梯度
+            print("gradient", gradient)
+            print("reward: ", rewards)
+            # ✅ 确保 gradient 是 NumPy 数组
+            gradient = gradient.cpu().numpy() if isinstance(gradient, torch.Tensor) else gradient
 
-            print(f"🔍 Normalized Rewards at Generation {gen+1}: {rewards}")
+            # ✅ 进行 weights 更新
+            weights_np += self.alpha * gradient
 
-            gradient = np.dot(noise.T, rewards) / self.population_size
+            # ✅ 重新转换为 PyTorch Tensor，放回 CUDA
+            weights = torch.tensor(weights_np, dtype=torch.float32, device=self.device)
 
-            print(f"🔍 Gradient at Generation {gen+1}: {gradient}")
-
-            weights += self.alpha * gradient
-
-            print(f"🔍 Updated Weights at Generation {gen+1}: {weights}")
-
+            # 计算当前 generation 的最终 loss
             loss, final_weights = self.env.evaluate_loss(weights)
-
 
             # ✅ 直接打印 Loss 和参数（限制小数点后 4 位）
             print(f"\n🌀 Generation {gen+1}/{self.generations} | Loss: {loss:.6f}")
