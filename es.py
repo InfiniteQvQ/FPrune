@@ -44,7 +44,12 @@ def get_llm(model_path, cache_dir="llm_weights"):
 def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, prune_m=0, ratios=None):
     use_cache = model.config.use_cache 
     model.config.use_cache = False 
-
+    
+    res = []
+    for i in ratios:
+        for j in range(7):
+            res.append(i)
+    ratios = np.array(res)
 
 
     print("loading calibdation data")
