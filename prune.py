@@ -562,14 +562,14 @@ def ww_sparsity_llama_7b_split(args, model, device=torch.device("cuda:0"),
                                    0.1027, 0.0973, 0.0944, 0.0933, 0.0933, 0.0737,
                                    0.0708, 0.0199], dtype=np.float32)
     eps = 1e-8  # 避免 log(0)
-    seg_importance_norm = np.log1p(seg_importance_raw)  # 计算 log(1 + x)
-    seg_importance_norm = (seg_importance_norm - seg_importance_norm.min()) / (seg_importance_norm.max() - seg_importance_norm.min() + eps)
-
-    # 重新赋值重要性
     layer_importance = np.zeros(32, dtype=np.float32)
     for seg_id, layer_list in segments.items():
         for layer_idx in layer_list:
-            layer_importance[layer_idx] = seg_importance_norm[seg_id]
+            layer_importance[layer_idx] = seg_importance_raw[seg_id]
+
+    # 赋值后再归一化
+    layer_importance = np.log1p(layer_importance)
+    layer_importance = (layer_importance - layer_importance.min()) / (layer_importance.max() - layer_importance.min() + eps)
 
     print("Log Scaled Normalized layer importance per layer:", layer_importance)
     pruning_ratios = 1 - layer_importance
