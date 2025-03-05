@@ -5,10 +5,10 @@ import torch
 from stable_baselines3 import PPO
 from transformers import AutoModelForCausalLM, AutoTokenizer, LlamaTokenizer
 from datasets import load_dataset
-from .layerwrapper import WrappedGPT
-from .data import get_loaders 
+from layerwrapper import WrappedGPT
+from data import get_loaders 
 import torch.nn as nn
-
+import copy
 
 def prepare_calibration_input(model, dataloader, device):
     layers = model.model.layers
@@ -233,6 +233,7 @@ def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0
     model.config.use_cache = use_cache 
     torch.cuda.empty_cache()
 
+# ------------------- RL 环境 -------------------
 class PruningEnv(gym.Env):
     def __init__(self, model, esd_ratios, importance_scores, args, tokenizer, device, inputs, base_loss):
         super(PruningEnv, self).__init__()
@@ -246,51 +247,41 @@ class PruningEnv(gym.Env):
         self.inputs = inputs
         self.base_loss = base_loss
 
-        # 保存模型的初始状态，确保每个 episode 都从同一状态开始
-        self.initial_state = copy.deepcopy(model.state_dict())
+        # 保存模型初始状态到 CPU，避免 GPU 内存不足
+        self.initial_state = copy.deepcopy({k: v.cpu() for k, v in model.state_dict().items()})
 
-        # 定义动作空间：每层的 ESD 权重（取值范围 [0,1]）
+        # 定义动作空间：每层的 ESD 权重取值范围 [0,1]
         self.action_space = gym.spaces.Box(low=0.0, high=1.0, shape=(self.num_layers,), dtype=np.float32)
-        # 定义观察空间：固定返回 ESD 与 GradNorm 剪枝比例（这里设计为不随 episode 改变的状态）
-        self.observation_space = gym.spaces.Box(
-            low=0.0, high=1.0, shape=(self.num_layers * 2,), dtype=np.float32
-        )
+        # 定义观察空间：这里返回固定的剪枝比率信息（可根据需要扩展）
+        self.observation_space = gym.spaces.Box(low=0.0, high=1.0, shape=(self.num_layers * 2,), dtype=np.float32)
 
     def reset(self):
-        # 恢复模型为初始状态，确保每个 episode 独立评估剪枝策略
+        # 恢复模型为初始状态，并转回目标设备
         self.model.load_state_dict(self.initial_state)
-        # 重置 ESD 权重为默认值（例如均为 0.8）
+        self.model.to(self.device)
+        # 重置默认的 ESD 权重（例如 0.8）
         self.esd_weights = np.ones(self.num_layers) * 0.8
-        # 返回初始观察值（这里简单返回不变的剪枝比例信息，可根据需要设计更丰富的状态）
         return np.concatenate([self.esd_ratios, self.importance_scores])
 
     def step(self, action):
-        # 将动作（每层的ESD权重）裁剪到 [0,1] 区间
         self.esd_weights = np.clip(action, 0.0, 1.0)
-        # 计算最终剪枝比例：线性组合ESD剪枝比例与重要性分数（例如GradNorm）
         final_pruning_ratios = self.esd_weights * self.esd_ratios + (1 - self.esd_weights) * self.importance_scores
 
-        # 执行剪枝操作（剪枝后的模型状态将影响loss）
+        # 执行剪枝操作（剪枝后的模型状态会影响 Loss）
         prune_wanda_ww(self.args, self.model, self.tokenizer, self.device, prune_ratios=final_pruning_ratios)
         
-        # 计算剪枝后的 Loss
         with torch.no_grad():
             outputs = self.model(**self.inputs, labels=self.inputs["input_ids"])
             pruned_loss = outputs.loss.item()
 
-        # 奖励函数：loss增幅越小奖励越高
         loss_increase = (pruned_loss - self.base_loss) / self.base_loss
         reward = -loss_increase
-
-        # 因为我们每个 episode 仅进行一次策略评估，所以直接返回 done=True
         done = True
-        # 观察值可以不变（或根据需要更新，这里返回固定的剪枝信息）
         obs = np.concatenate([self.esd_ratios, self.importance_scores])
         return obs, reward, done, {}
 
-# 主程序部分
+# ------------------- 主程序 -------------------
 if __name__ == "__main__":
-    # 解析命令行参数
     parser = argparse.ArgumentParser()
     parser.add_argument('--model', type=str, default="pinkmanlove/llama-7b-hf", help="LLaMA 模型路径")
     parser.add_argument('--cache_dir', type=str, default="/root/autodl-tmp/llm_weights", help="模型缓存路径")
@@ -301,9 +292,10 @@ if __name__ == "__main__":
     parser.add_argument('--epsilon', type=float, default=0.2, help="剪枝比例的微调范围")
     parser.add_argument('--nsamples', type=int, default=10, help="校准样本数")
     parser.add_argument('--seed', type=int, default=42, help="随机种子")
+    # 如果使用 variant 剪枝，则需要该参数
+    parser.add_argument('--use_variant', action='store_true', help="是否使用 Wanda variant 剪枝")
     args = parser.parse_args()
 
-    # 加载 LLaMA-7B 和 TinyStories 数据集
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = AutoModelForCausalLM.from_pretrained(args.model, cache_dir=args.cache_dir, device_map="auto", torch_dtype=torch.float16)
     tokenizer_name = "HuggingFaceM4/llama-7b-tokenizer"
@@ -314,36 +306,36 @@ if __name__ == "__main__":
     inputs = tokenizer(sample_texts, return_tensors="pt", padding=True, truncation=True, max_length=256)
     inputs = {k: v.to(model.device) for k, v in inputs.items()}
 
-    # 计算剪枝前的 Loss（基准）
     with torch.no_grad():
         outputs = model(**inputs, labels=inputs["input_ids"])
         base_loss = outputs.loss.item()
     print(f"🚀 剪枝前 LLaMA-7B 在 TinyStories Loss: {base_loss:.6f}")
 
-    # 读取 ESD 和 GradNorm 剪枝比例（示例数据）
-    esd_ratios = np.array([0.57042164, 0.61759788, 0.63153112, 0.63073802, 0.65285629, 0.6482451,
-     0.63005912, 0.5921672 , 0.59738964, 0.56803465, 0.58708227, 0.58937198,
-     0.59899241, 0.61086321, 0.61877495, 0.66812801, 0.65868002, 0.71560568,
-     0.79057246, 0.74378908, 0.79461485, 0.82483709, 0.77005184 ,0.76292461,
-     0.81216604, 0.85205203, 0.8312614 , 0.84147072, 0.78692085, 0.82967305,
-     0.84142309, 0.73170304])
-    importance_scores = np.array([0, 0.25823024, 0.64031047, 0.672687, 0.7274453, 0.7274453,
-     0.7274453, 0.7274453, 0.7274453, 0.7274453, 0.7274453, 0.7274453,
-     0.7462126, 0.7462126, 0.7462126, 0.74832606, 0.74832606, 0.74832606,
-     0.74936193, 0.74936193, 0.74936193, 0.74992037, 0.74992037, 0.74992037,
-     0.75013256, 0.75013256, 0.75013256, 0.75013256, 0.75394976, 0.75394976,
-     0.7545204, 0.764797])
-    
-    # 创建 RL 环境，传入必要的参数
+    # 示例数据：ESD 剪枝比例和 GradNorm（或其他重要性指标）
+    esd_ratios = np.array([
+        0.57042164, 0.61759788, 0.63153112, 0.63073802, 0.65285629, 0.6482451,
+        0.63005912, 0.5921672 , 0.59738964, 0.56803465, 0.58708227, 0.58937198,
+        0.59899241, 0.61086321, 0.61877495, 0.66812801, 0.65868002, 0.71560568,
+        0.79057246, 0.74378908, 0.79461485, 0.82483709, 0.77005184, 0.76292461,
+        0.81216604, 0.85205203, 0.8312614 , 0.84147072, 0.78692085, 0.82967305,
+        0.84142309, 0.73170304
+    ])
+    importance_scores = np.array([
+        0, 0.25823024, 0.64031047, 0.672687, 0.7274453, 0.7274453,
+        0.7274453, 0.7274453, 0.7274453, 0.7274453, 0.7274453, 0.7274453,
+        0.7462126, 0.7462126, 0.7462126, 0.74832606, 0.74832606, 0.74832606,
+        0.74936193, 0.74936193, 0.74936193, 0.74992037, 0.74992037, 0.74992037,
+        0.75013256, 0.75013256, 0.75013256, 0.75013256, 0.75394976, 0.75394976,
+        0.7545204, 0.764797
+    ])
+
     env = PruningEnv(model, esd_ratios, importance_scores, args, tokenizer, device, inputs, base_loss)
     model_rl = PPO("MlpPolicy", env, verbose=1)
     model_rl.learn(total_timesteps=5000)
 
-    # 预测最优剪枝策略
     best_action = model_rl.predict(env.reset())[0]
     print(f"🚀 最优 ESD 权重（每层）: {best_action}")
 
-    # 计算最终剪枝比例
     final_pruning_ratios = best_action * esd_ratios + (1 - best_action) * importance_scores
     print("🔥 RL 计算的最终剪枝比例:", final_pruning_ratios)
     np.save("final_pruning_ratios_rl.npy", final_pruning_ratios)
