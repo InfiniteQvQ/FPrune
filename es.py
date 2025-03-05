@@ -282,44 +282,40 @@ class LayerPruningOptimization:
 
     def evaluate_loss(self, weights):
         """计算当前 `weights` (混合比例) 下剪枝后模型的 loss"""
-        esd_contrib = self.esd_ratios * weights
-        imp_contrib = self.importance_scores * (1 - weights)
+        weights_np = weights.cpu().numpy() if isinstance(weights, torch.Tensor) else weights  # 确保是 NumPy 数组
+
+        esd_contrib = self.esd_ratios * weights_np
+        imp_contrib = self.importance_scores * (1 - weights_np)
         layer_weights = esd_contrib + imp_contrib  # 计算最终混合权重
+
+        # ✅ 确保 layer_weights 仍然是 NumPy 数组
+        layer_weights = layer_weights.astype(np.float32)
 
         # 加载 LLM 模型
         model = get_llm(self.model_path, self.cache_dir)
 
         try:
-            # ✅ 确保 `layer_weights` 在 `model.device`（防止多 GPU 设备不匹配）
-            device = model.device
-            layer_weights = torch.tensor(layer_weights, dtype=torch.float32, device=device)
-
             # 剪枝
-            prune_wanda(self.args, model, self.tokenizer, device, ratios=layer_weights)
+            prune_wanda(self.args, model, self.tokenizer, self.device, ratios=layer_weights)
 
             # 评估剪枝后 loss
             sample_texts = [self.dataset[i]["text"] for i in range(100)]
             inputs = self.tokenizer(sample_texts, return_tensors="pt", padding=True, truncation=True, max_length=256)
-
-            # ✅ 确保 `inputs` 也在 `model.device`
-            inputs = {k: v.to(device) for k, v in inputs.items()}
+            inputs = {k: v.to(model.device) for k, v in inputs.items()}
 
             with torch.no_grad():
                 outputs = model(**inputs, labels=inputs["input_ids"])
                 loss = outputs.loss.item()
-
         except Exception as e:
             print(f"❌ Evaluation failed: {e}")
-            import traceback
-            traceback.print_exc()
             loss = float("inf")  # 避免异常导致 ES 失败
-
         finally:
             # 释放模型
             del model
             torch.cuda.empty_cache()
-        
+
         return loss, layer_weights
+
 
 
 
