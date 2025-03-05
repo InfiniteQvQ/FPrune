@@ -161,40 +161,10 @@ def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0
 
     model.config.use_cache = use_cache 
     torch.cuda.empty_cache()
+    sparsity = (model.state_dict()["model.layers.0.self_attn.q_proj.weight"] == 0).float().mean().item()
+    print(f"🔍 Layer 0 Pruned Sparsity: {sparsity:.4f}")
 
-    # dev = model.hf_device_map["model.embed_tokens"]
-    if "model.embed_tokens" in model.hf_device_map:
-        device = model.hf_device_map["model.embed_tokens"]
-
-    dtype = next(iter(model.parameters())).dtype
-    inps = torch.zeros((128, model.seqlen, model.config.hidden_size), dtype=dtype, device=device)
-    inps.requires_grad = False
-    cache = {'i': 0, 'attention_mask': None, "position_ids": None}
-
-    class Catcher(nn.Module):
-        def __init__(self, module):
-            super().__init__()
-            self.module = module
-        def forward(self, inp, **kwargs):
-            inps[cache['i']] = inp
-            cache['i'] += 1
-            cache['attention_mask'] = kwargs['attention_mask']
-            cache['position_ids'] = kwargs['position_ids']
-            raise ValueError
-    layers[0] = Catcher(layers[0])
-    for batch in dataloader:
-        try:
-            model(batch[0].to(device))
-        except ValueError:
-            pass 
-
-    layers[0] = layers[0].module
-    torch.cuda.empty_cache()
-    outs = torch.zeros_like(inps)
-    attention_mask = cache['attention_mask']
-    position_ids = cache['position_ids']
-
-    return inps, outs, attention_mask, position_ids
+    
 
 def prepare_calibration_input(model, dataloader, device):
     layers = model.model.layers
@@ -297,6 +267,8 @@ class LayerPruningOptimization:
 
         # 加载 LLM 模型
         model = get_llm(self.model_path, self.cache_dir)
+      
+    
 
         try:
             # 剪枝
