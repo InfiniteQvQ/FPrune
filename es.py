@@ -260,31 +260,16 @@ class LayerPruningOptimization:
 
     def evaluate_loss(self, weights):
         """计算当前 `weights` (混合比例) 下剪枝后模型的 loss"""
-
-        torch.cuda.empty_cache()
-        torch.cuda.ipc_collect()
-
-        weights_np = weights.cpu().numpy() if isinstance(weights, torch.Tensor) else weights  # 确保是 NumPy 数组
-
-        esd_contrib = self.esd_ratios * weights_np
-        imp_contrib = self.importance_scores * (1 - weights_np)
+        esd_contrib = self.esd_ratios * weights
+        imp_contrib = self.importance_scores * (1 - weights)
         layer_weights = esd_contrib + imp_contrib  # 计算最终混合权重
-
-        # ✅ 确保 layer_weights 仍然是 NumPy 数组
-        layer_weights = layer_weights.astype(np.float32)
 
         # 加载 LLM 模型
         model = get_llm(self.model_path, self.cache_dir)
-      
-    
 
         try:
-            print("🔍 Before Pruning:")
-            calculate_sparsity(model)
+            # 剪枝
             prune_wanda(self.args, model, self.tokenizer, self.device, ratios=layer_weights)
-            print("🔍 After Pruning:")
-            calculate_sparsity(model)
-            
 
             # 评估剪枝后 loss
             sample_texts = [self.dataset[i]["text"] for i in range(100)]
@@ -294,6 +279,8 @@ class LayerPruningOptimization:
             with torch.no_grad():
                 outputs = model(**inputs, labels=inputs["input_ids"])
                 loss = outputs.loss.item()
+            
+            print(f"📉 Eval Loss: {loss:.6f}")  # 打印 loss
         except Exception as e:
             print(f"❌ Evaluation failed: {e}")
             loss = float("inf")  # 避免异常导致 ES 失败
@@ -301,9 +288,9 @@ class LayerPruningOptimization:
             # 释放模型
             del model
             torch.cuda.empty_cache()
-            torch.cuda.ipc_collect()
-
+        
         return loss, layer_weights
+
 
 
 
