@@ -14,23 +14,19 @@ import warnings
 #############################################
 # Calibration 函数：在 CPU 上创建校准数据
 def prepare_calibration_input(model, dataloader, device, nsamples):
-    """
-    在 CPU 上创建校准数据，然后后续按需转移到目标设备。
-    """
     layers = model.model.layers
-    init_device = "cpu"  # 数据先在 CPU 上创建
+    init_device = "cpu"
     dtype = next(iter(model.parameters())).dtype
     inps = torch.zeros((nsamples, model.seqlen, model.config.hidden_size),
                        dtype=dtype, device=init_device)
     inps.requires_grad = False
     cache = {'i': 0, 'attention_mask': None, "position_ids": None}
-
     class Catcher(nn.Module):
         def __init__(self, module):
             super().__init__()
             self.module = module
         def forward(self, inp, **kwargs):
-            inps[cache['i']] = inp.cpu()  # 保存到 CPU
+            inps[cache['i']] = inp.cpu()
             cache['i'] += 1
             cache['attention_mask'] = kwargs['attention_mask']
             cache['position_ids'] = kwargs.get('position_ids', None)
@@ -49,9 +45,6 @@ def prepare_calibration_input(model, dataloader, device, nsamples):
     return inps, outs, attention_mask, position_ids
 
 def prepare_calibration_input_opt(model, dataloader, device, nsamples):
-    """
-    针对 OPT 模型的校准函数，同样在 CPU 上创建数据
-    """
     layers = model.model.decoder.layers
     init_device = "cpu"
     dtype = next(iter(model.parameters())).dtype
@@ -59,7 +52,6 @@ def prepare_calibration_input_opt(model, dataloader, device, nsamples):
                        dtype=dtype, device=init_device)
     inps.requires_grad = False
     cache = {'i': 0, 'attention_mask': None}
-    
     class Catcher(nn.Module):
         def __init__(self, module):
             super().__init__()
@@ -84,20 +76,19 @@ def prepare_calibration_input_opt(model, dataloader, device, nsamples):
 #############################################
 # 工具函数
 def find_layers(module, layers=[nn.Linear], name=''):
-    """
-    递归查找模块中指定类型的层
-    """
     if type(module) in layers:
         return {name: module}
     res = {}
     for name1, child in module.named_children():
-        res.update(find_layers(child, layers=layers, name=name + '.' + name1 if name != '' else name1))
+        res.update(find_layers(child, layers=layers,
+                               name=name + '.' + name1 if name != '' else name1))
     return res
 
 def return_given_alpha(alpha, sort_res, W_metric, tmp_metric, sum_before):
     thres_cumsum = sum_before * alpha 
     sort_mask = tmp_metric <= thres_cumsum.reshape((-1,1))
-    thres = torch.gather(sort_res[0], dim=1, index=sort_mask.sum(dim=1, keepdims=True)-1)
+    thres = torch.gather(sort_res[0], dim=1,
+                         index=sort_mask.sum(dim=1, keepdims=True)-1)
     W_mask = (W_metric <= thres)
     cur_sparsity = (W_mask==True).sum() / W_mask.numel()
     return W_mask, cur_sparsity
@@ -105,13 +96,8 @@ def return_given_alpha(alpha, sort_res, W_metric, tmp_metric, sum_before):
 #############################################
 # Wanda 剪枝函数（使用预加载的校准数据）
 def prune_wanda_ww_cached(args, model, tokenizer, device, prune_ratios, cal_data):
-    """
-    使用预加载的校准数据 (inps, outs, attention_mask, position_ids)
-    来运行 Wanda 剪枝，而不重复调用 get_loaders。
-    """
     s1 = 1.0 - args.epsilon
     s2 = 1.0 + args.epsilon
-    # 将每层目标比例扩展到每层内部的子层（假设每层 7 个子层）
     res = []
     for j in prune_ratios:
         for i in range(7):
@@ -204,7 +190,7 @@ def prune_wanda_ww_cached(args, model, tokenizer, device, prune_ratios, cal_data
     torch.cuda.empty_cache()
 
 #############################################
-# RL 环境：每个 episode 重新加载模型，并预先加载好校准数据，RL 仅调整参数
+# RL 环境：每个 episode 重新加载模型，并预先加载校准数据，RL 仅调整参数
 class PruningEnv(gym.Env):
     """
     RL 环境：
@@ -229,12 +215,9 @@ class PruningEnv(gym.Env):
         self.cal_data = None
 
     def reset(self):
-        # 重新加载模型
         self.model = self.model_loader()
-        # 如果模型没有 seqlen，则设置
         if not hasattr(self.model, 'seqlen'):
             self.model.seqlen = self.model.config.max_position_embeddings
-        # 预先加载校准数据一次，并缓存
         dataloader, _ = get_loaders("c4", nsamples=self.args.nsamples,
                                     seed=self.args.seed, seqlen=self.model.seqlen,
                                     tokenizer=self.tokenizer)
@@ -246,10 +229,8 @@ class PruningEnv(gym.Env):
         return np.concatenate([self.esd_ratios, self.importance_scores])
     
     def step(self, action):
-        # RL 动作：每层的 ESD 权重
         esd_weights = np.clip(action, 0.0, 1.0)
         final_pruning_ratios = esd_weights * self.esd_ratios + (1 - esd_weights) * self.importance_scores
-        # 调用 Wanda 剪枝，使用预加载的校准数据
         prune_wanda_ww_cached(self.args, self.model, self.tokenizer, self.device,
                                 prune_ratios=final_pruning_ratios, cal_data=self.cal_data)
         with torch.no_grad():
@@ -284,7 +265,7 @@ if __name__ == "__main__":
     torch.manual_seed(args.seed)
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    # 定义模型加载函数，供 RL 环境调用，每次返回新模型
+    # 定义模型加载函数，每次返回新模型
     model_loader = lambda: AutoModelForCausalLM.from_pretrained(
         args.model, cache_dir=args.cache_dir, device_map="auto", torch_dtype=torch.float16
     )
@@ -325,7 +306,7 @@ if __name__ == "__main__":
     
     # 创建 RL 环境：每个 episode 重新加载模型和预先加载校准数据
     env = PruningEnv(model_loader, esd_ratios, importance_scores, args, tokenizer, device, inputs, base_loss)
-    model_rl = PPO("MlpPolicy", env, verbose=1)
+    model_rl = PPO("MlpPolicy", env, verbose=1, device='cpu')  # 用 CPU 训练策略网络
     model_rl.learn(total_timesteps=5000)
     
     best_action = model_rl.predict(env.reset())[0]
