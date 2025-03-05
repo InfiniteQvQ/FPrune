@@ -161,8 +161,6 @@ def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0
 
     model.config.use_cache = use_cache 
     torch.cuda.empty_cache()
-    sparsity = (model.state_dict()["model.layers.0.self_attn.q_proj.weight"] == 0).float().mean().item()
-    print(f"🔍 Layer 0 Pruned Sparsity: {sparsity:.4f}")
 
     
 
@@ -272,8 +270,12 @@ class LayerPruningOptimization:
 
         try:
             # 剪枝
+            print("🔍 Before Pruning (First 5 weights):", model.state_dict()["model.layers.0.self_attn.q_proj.weight"].view(-1)[:5])
             prune_wanda(self.args, model, self.tokenizer, self.device, ratios=layer_weights)
-
+            print("🔍 After Pruning (First 5 weights):", model.state_dict()["model.layers.0.self_attn.q_proj.weight"].view(-1)[:5])
+            torch.save(model.state_dict(), "pruned_model.pth")
+            pruned_model = get_llm(self.model_path, self.cache_dir)
+            pruned_model.load_state_dict(torch.load("pruned_model.pth"))
             # 评估剪枝后 loss
             sample_texts = [self.dataset[i]["text"] for i in range(100)]
             inputs = self.tokenizer(sample_texts, return_tensors="pt", padding=True, truncation=True, max_length=256)
