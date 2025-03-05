@@ -50,9 +50,9 @@ def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0
             res.append(i)
     ratios = np.array(res)
     print(ratios)
-    print("loading calibdation data")
-    dataloader, _ = get_loaders("c4",nsamples=32,seed=args.seed,seqlen=model.seqlen,tokenizer=tokenizer)
-    print("dataset loading complete")
+    #print("loading calibdation data")
+    dataloader, _ = get_loaders("c4",nsamples=args.nsamples,seed=args.seed,seqlen=model.seqlen,tokenizer=tokenizer)
+    #print("dataset loading complete")
     with torch.no_grad():
         if "OPT" in model.__class__.__name__:
             inps, outs, attention_mask, position_ids = prepare_calibration_input_opt(model, dataloader, device)
@@ -60,7 +60,7 @@ def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0
             inps, outs, attention_mask, position_ids = prepare_calibration_input(model, dataloader, device)
 
 
-    print ("inps",inps)
+    #print ("inps",inps)
 
     if "OPT" in model.__class__.__name__:
         layers = model.model.decoder.layers
@@ -78,9 +78,9 @@ def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0
 
         if f"model.layers.{i}" in model.hf_device_map:   ## handle the case for llama-30B and llama-65B, when the device map has multiple GPUs;
             dev = model.hf_device_map[f"model.layers.{i}"]
-            print("using wanda!")
+            #print("using wanda!")
             dev = model.hf_device_map[f"model.layers.{i}"]
-            print(f"layer {i} device {dev}")
+            #print(f"layer {i} device {dev}")
             inps, outs, attention_mask, position_ids = inps.to(dev), outs.to(dev), attention_mask.to(dev), position_ids.to(dev)
 
         wrapped_layers = {}
@@ -106,7 +106,7 @@ def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0
             h.remove()
 
         for name in subset:
-            print(f"pruning layer {i} name {name}")
+            #print(f"pruning layer {i} name {name}")
             W_metric = torch.abs(subset[name].weight.data) * torch.sqrt(wrapped_layers[name].scaler_row.reshape((1,-1)))
 
             W_mask = (torch.zeros_like(W_metric) == 1)  ## initialize a mask to be all False
@@ -343,21 +343,20 @@ class EvolutionStrategy:
             gradient = np.dot(noise.T, rewards) / self.population_size
             weights += self.alpha * gradient
 
+            # 计算当前 generation 的最终 loss
             loss, final_weights = self.env.evaluate_loss(weights)
 
             # ✅ 直接打印 Loss 和参数（限制小数点后 4 位）
-            print(f"🌀 Generation {gen+1}/{self.generations} | Loss: {loss:.6f}")
+            print(f"\n🌀 Generation {gen+1}/{self.generations} | Loss: {loss:.6f}")
             print("📌 Layer Weights:", np.round(weights, 4))  # 限制 4 位小数
+            print("-" * 60)  # 让日志更清晰
 
             if loss < best_loss:
                 best_loss = loss
                 best_weights = final_weights
 
-
             progress_bar.set_postfix({"Best Loss": f"{best_loss:.6f}"})
             progress_bar.refresh()
-
-            tqdm.write(f"🌀 Generation {gen+1}/{self.generations} | Loss: {loss:.6f} | Best Loss: {best_loss:.6f}")
 
         return best_weights, best_loss
 
@@ -368,7 +367,7 @@ if __name__ == "__main__":
     parser.add_argument('--model', type=str, default="pinkmanlove/llama-7b-hf")
     parser.add_argument('--cache_dir', type=str, default="/root/autodl-tmp/llm_weights")
     parser.add_argument('--sparsity_ratio', type=float, default=0.7)
-    parser.add_argument('--nsamples', type=int, default=1)
+    parser.add_argument('--nsamples', type=int, default=32)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--use_variant', action='store_true')
     args = parser.parse_args()
@@ -409,7 +408,7 @@ if __name__ == "__main__":
     env = LayerPruningOptimization(model_path, cache_dir, dataset, tokenizer, esd_ratios, importance_scores, args)
     print("env done")
     # 运行进化策略优化
-    es = EvolutionStrategy(env, population_size=20, sigma=0.1, alpha=0.02, generations=50)
+    es = EvolutionStrategy(env, population_size=10, sigma=0.1, alpha=0.02, generations=5)
     
     best_weights, best_loss = es.optimize()
 
