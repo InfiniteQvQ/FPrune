@@ -350,7 +350,8 @@ class EvolutionStrategy:
 
         for gen in progress_bar:
             noise = np.random.randn(self.population_size, self.num_layers)  # 生成噪声
-            population = weights + self.sigma * noise  # 生成新种群
+            population = weights.cpu().numpy() + self.sigma * noise  # 生成新种群
+
 
             rewards = np.zeros(self.population_size)
             for i in range(self.population_size):
