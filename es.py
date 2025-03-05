@@ -52,7 +52,8 @@ def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0
         for j in range(7):
             res.append(i)
     ratios = np.array(res)
-    ratios = torch.tensor(ratios, dtype=torch.float32, device=device)
+
+
     #print(ratios)
     #print("loading calibdation data")
     dataloader, _ = get_loaders("c4",nsamples=args.nsamples,seed=args.seed,seqlen=model.seqlen,tokenizer=tokenizer)
