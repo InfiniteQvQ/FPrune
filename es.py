@@ -44,16 +44,14 @@ def get_llm(model_path, cache_dir="llm_weights"):
 def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, prune_m=0, ratios=None):
     use_cache = model.config.use_cache 
     model.config.use_cache = False 
-
     res = []
     for i in ratios:
         for j in range(7):
             res.append(i)
     ratios = np.array(res)
     print(ratios)
-
     print("loading calibdation data")
-    dataloader, _ = get_loaders("c4",nsamples=args.nsamples,seed=args.seed,seqlen=model.seqlen,tokenizer=tokenizer)
+    dataloader, _ = get_loaders("c4",nsamples=32,seed=args.seed,seqlen=model.seqlen,tokenizer=tokenizer)
     print("dataset loading complete")
     with torch.no_grad():
         if "OPT" in model.__class__.__name__:
@@ -68,11 +66,11 @@ def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0
         layers = model.model.decoder.layers
     else:    
         layers = model.model.layers
-    
+
     layer_num = len(find_layers(layers))
     if ratios is None:
         ratios = [args.sparsity_ratio for i in range(layer_num)]
-    
+
     k=0
     for i in range(len(layers)):
         layer = layers[i]
@@ -145,7 +143,7 @@ def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0
                     indices = sort_res[1][:,:int(W_metric.shape[1]*ratios[k])]
                     k+=1
                     W_mask.scatter_(1, indices, True)
-#             print ("W_mask",W_mask)
+    #             print ("W_mask",W_mask)
             subset[name].weight.data[W_mask] = 0  ## set weights to zero 
 
         for j in range(args.nsamples):
@@ -158,6 +156,40 @@ def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0
 
     model.config.use_cache = use_cache 
     torch.cuda.empty_cache()
+
+    # dev = model.hf_device_map["model.embed_tokens"]
+    if "model.embed_tokens" in model.hf_device_map:
+        device = model.hf_device_map["model.embed_tokens"]
+
+    dtype = next(iter(model.parameters())).dtype
+    inps = torch.zeros((128, model.seqlen, model.config.hidden_size), dtype=dtype, device=device)
+    inps.requires_grad = False
+    cache = {'i': 0, 'attention_mask': None, "position_ids": None}
+
+    class Catcher(nn.Module):
+        def __init__(self, module):
+            super().__init__()
+            self.module = module
+        def forward(self, inp, **kwargs):
+            inps[cache['i']] = inp
+            cache['i'] += 1
+            cache['attention_mask'] = kwargs['attention_mask']
+            cache['position_ids'] = kwargs['position_ids']
+            raise ValueError
+    layers[0] = Catcher(layers[0])
+    for batch in dataloader:
+        try:
+            model(batch[0].to(device))
+        except ValueError:
+            pass 
+
+    layers[0] = layers[0].module
+    torch.cuda.empty_cache()
+    outs = torch.zeros_like(inps)
+    attention_mask = cache['attention_mask']
+    position_ids = cache['position_ids']
+
+    return inps, outs, attention_mask, position_ids
 
 def prepare_calibration_input(model, dataloader, device):
     layers = model.model.layers
@@ -271,7 +303,7 @@ class LayerPruningOptimization:
             # 释放模型
             del model
             torch.cuda.empty_cache()
-
+        
         return loss, layer_weights
 
 
@@ -298,8 +330,8 @@ class EvolutionStrategy:
         progress_bar = tqdm(range(self.generations), desc="Training Progress", file=sys.stdout, ascii=True)
 
         for gen in progress_bar:
-            noise = np.random.randn(self.population_size, self.num_layers)
-            population = weights + self.sigma * noise
+            noise = np.random.randn(self.population_size, self.num_layers)  # 生成噪声
+            population = weights + self.sigma * noise  # 生成新种群
 
             rewards = np.zeros(self.population_size)
             for i in range(self.population_size):
@@ -312,9 +344,15 @@ class EvolutionStrategy:
             weights += self.alpha * gradient
 
             loss, final_weights = self.env.evaluate_loss(weights)
+
+            # ✅ 直接打印 Loss 和参数（限制小数点后 4 位）
+            print(f"🌀 Generation {gen+1}/{self.generations} | Loss: {loss:.6f}")
+            print("📌 Layer Weights:", np.round(weights, 4))  # 限制 4 位小数
+
             if loss < best_loss:
                 best_loss = loss
                 best_weights = final_weights
+
 
             progress_bar.set_postfix({"Best Loss": f"{best_loss:.6f}"})
             progress_bar.refresh()
