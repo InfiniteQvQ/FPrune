@@ -272,10 +272,11 @@ class LayerPruningOptimization:
             # 剪枝
             print("🔍 Before Pruning (First 5 weights):", model.state_dict()["model.layers.0.self_attn.q_proj.weight"].view(-1)[:5])
             prune_wanda(self.args, model, self.tokenizer, self.device, ratios=layer_weights)
-            print("🔍 After Pruning (First 5 weights):", model.state_dict()["model.layers.0.self_attn.q_proj.weight"].view(-1)[:5])
-            torch.save(model.state_dict(), "pruned_model.pth")
             pruned_model = get_llm(self.model_path, self.cache_dir)
-            pruned_model.load_state_dict(torch.load("pruned_model.pth"))
+            pruned_model.load_state_dict(torch.load("pruned_model.pth", map_location="cuda:0"))
+            pruned_model.to("cuda:0")
+            print("🔍 After Loading - Layer 0 First 5 Weights:", pruned_model.state_dict()["model.layers.0.self_attn.q_proj.weight"].view(-1)[:5])
+
             # 评估剪枝后 loss
             sample_texts = [self.dataset[i]["text"] for i in range(100)]
             inputs = self.tokenizer(sample_texts, return_tensors="pt", padding=True, truncation=True, max_length=256)
