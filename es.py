@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from datasets import load_dataset
-from transformers import LlamaTokenizer
+from transformers import LlamaTokenizer, AutoModelForCausalLM
 from scipy.stats import norm
 from lib.data import get_loaders
 from lib.layerwrapper import WrappedGPT
@@ -30,18 +30,25 @@ def return_given_alpha(alpha, sort_res, W_metric, tmp_metric, sum_before):
     cur_sparsity = (W_mask==True).sum() / W_mask.numel()
     return W_mask, cur_sparsity
 
-def get_llm(model_path, cache_dir):
-    from transformers import AutoModelForCausalLM
-    return AutoModelForCausalLM.from_pretrained(model_path, cache_dir=cache_dir, device_map="auto", torch_dtype=torch.float16).cuda()
+def get_llm(model_path, cache_dir="llm_weights"):
+    model = AutoModelForCausalLM.from_pretrained(
+        model_path,
+        torch_dtype=torch.bfloat16,
+        cache_dir=cache_dir,
+        low_cpu_mem_usage=True,
+        device_map="auto"
+    )
+    model.seqlen = 2048
+    return model
 
 def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, prune_m=0, ratios=None):
     use_cache = model.config.use_cache 
     model.config.use_cache = False 
-    seqlen = getattr(model.config, "max_position_embeddings", 2048)
+
 
 
     print("loading calibdation data")
-    dataloader, _ = get_loaders("c4",nsamples=args.nsamples,seed=args.seed,seqlen=seqlen,tokenizer=tokenizer)
+    dataloader, _ = get_loaders("c4",nsamples=args.nsamples,seed=args.seed,seqlen=model.seqlen,tokenizer=tokenizer)
     print("dataset loading complete")
     with torch.no_grad():
         if "OPT" in model.__class__.__name__:
