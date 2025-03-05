@@ -6,15 +6,18 @@ import torch
 import torch.nn as nn
 from transformers import AutoModelForCausalLM, LlamaTokenizer
 from stable_baselines3 import PPO
+from stable_baselines3.common.callbacks import BaseCallback
 from datasets import load_dataset
 from lib.layerwrapper import WrappedGPT
 from lib.data import get_loaders
 import warnings
 import multiprocessing as mp
+import sys
 
 #############################################
 # 模型加载函数，每次调用返回新模型
 def get_llm(model_path, cache_dir="/root/autodl-tmp/llm_weights"):
+    print("Loading model from", model_path, flush=True)
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
         torch_dtype=torch.bfloat16,
@@ -22,15 +25,16 @@ def get_llm(model_path, cache_dir="/root/autodl-tmp/llm_weights"):
         low_cpu_mem_usage=True,
         device_map="auto"
     )
-    # 设置序列长度
     model.seqlen = model.config.max_position_embeddings
+    print("Model loaded. seqlen =", model.seqlen, flush=True)
     return model
 
 #############################################
 # Calibration 函数：在 CPU 上创建校准数据
 def prepare_calibration_input(model, dataloader, device, nsamples):
+    print("Preparing calibration data on CPU...", flush=True)
     layers = model.model.layers
-    init_device = "cpu"  # 数据先创建在 CPU 上
+    init_device = "cpu"
     dtype = next(iter(model.parameters())).dtype
     inps = torch.zeros((nsamples, model.seqlen, model.config.hidden_size),
                        dtype=dtype, device=init_device)
@@ -42,7 +46,7 @@ def prepare_calibration_input(model, dataloader, device, nsamples):
             super().__init__()
             self.module = module
         def forward(self, inp, **kwargs):
-            inps[cache['i']] = inp.cpu()  # 保存到 CPU
+            inps[cache['i']] = inp.cpu()
             cache['i'] += 1
             cache['attention_mask'] = kwargs['attention_mask']
             cache['position_ids'] = kwargs.get('position_ids', None)
@@ -58,9 +62,11 @@ def prepare_calibration_input(model, dataloader, device, nsamples):
     outs = torch.zeros_like(inps)
     attention_mask = cache['attention_mask']
     position_ids = cache['position_ids']
+    print("Calibration data prepared.", flush=True)
     return inps, outs, attention_mask, position_ids
 
 def prepare_calibration_input_opt(model, dataloader, device, nsamples):
+    print("Preparing calibration data for OPT model on CPU...", flush=True)
     layers = model.model.decoder.layers
     init_device = "cpu"
     dtype = next(iter(model.parameters())).dtype
@@ -88,17 +94,17 @@ def prepare_calibration_input_opt(model, dataloader, device, nsamples):
     torch.cuda.empty_cache()
     outs = torch.zeros_like(inps)
     attention_mask = cache['attention_mask']
+    print("Calibration data for OPT prepared.", flush=True)
     return inps, outs, attention_mask, None
 
 #############################################
-# 工具函数
+# 工具函数：递归查找指定类型的层
 def find_layers(module, layers=[nn.Linear], name=''):
     if type(module) in layers:
         return {name: module}
     res = {}
     for name1, child in module.named_children():
-        res.update(find_layers(child, layers=layers,
-                               name=name + '.' + name1 if name != '' else name1))
+        res.update(find_layers(child, layers=layers, name=name + '.' + name1 if name != '' else name1))
     return res
 
 def return_given_alpha(alpha, sort_res, W_metric, tmp_metric, sum_before):
@@ -112,6 +118,7 @@ def return_given_alpha(alpha, sort_res, W_metric, tmp_metric, sum_before):
 #############################################
 # Wanda 剪枝函数（使用预加载的校准数据）
 def prune_wanda_ww_cached(args, model, tokenizer, device, prune_ratios, cal_data):
+    print("Running Wanda pruning with given ratios...", flush=True)
     s1 = 1.0 - args.epsilon
     s2 = 1.0 + args.epsilon
     res = []
@@ -120,7 +127,7 @@ def prune_wanda_ww_cached(args, model, tokenizer, device, prune_ratios, cal_data
             res.append(j)
     res = np.array(res)
     inps, outs, attention_mask, position_ids = cal_data
-    print("inps", inps.shape)
+    print("inps shape:", inps.shape, flush=True)
     if "OPT" in model.__class__.__name__:
         layers = model.model.decoder.layers
     else:
@@ -134,7 +141,7 @@ def prune_wanda_ww_cached(args, model, tokenizer, device, prune_ratios, cal_data
         subset = find_layers(layer)
         if f"model.layers.{i}" in model.hf_device_map:
             dev = model.hf_device_map[f"model.layers.{i}"]
-            print(f"using wanda! layer {i} device {dev}")
+            print(f"using wanda! layer {i} device {dev}", flush=True)
         else:
             dev = device
         wrapped_layers = {}
@@ -162,7 +169,7 @@ def prune_wanda_ww_cached(args, model, tokenizer, device, prune_ratios, cal_data
         for h in handles:
             h.remove()
         for name in subset:
-            print(f"pruning layer {i} name {name}")
+            print(f"pruning layer {i} name {name}", flush=True)
             W_metric = torch.abs(subset[name].weight.data) * torch.sqrt(wrapped_layers[name].scaler_row.reshape((1, -1)))
             W_mask = (torch.zeros_like(W_metric) == 1)
             if args.use_variant:
@@ -181,7 +188,7 @@ def prune_wanda_ww_cached(args, model, tokenizer, device, prune_ratios, cal_data
                         alpha_hist[0] = alpha
                     alpha = alpha_new 
                     W_mask, cur_sparsity = return_given_alpha(alpha, sort_res, W_metric, tmp_metric, sum_before_val)
-                print(f"alpha found {alpha} sparsity {cur_sparsity:.6f}")
+                print(f"alpha found {alpha} sparsity {cur_sparsity:.6f}", flush=True)
             else:
                 sort_res = torch.sort(W_metric, dim=-1, stable=True)
                 indices = sort_res[1][:, :int(W_metric.shape[1]*res[k])]
@@ -202,29 +209,46 @@ def prune_wanda_ww_cached(args, model, tokenizer, device, prune_ratios, cal_data
                     outs[j] = layer(sample_inp, attention_mask=sample_attention, position_ids=sample_position_ids)[0]
         inps = outs.cpu()
     torch.cuda.empty_cache()
+    print("Wanda pruning finished.", flush=True)
 
 #############################################
 # 定义一个独立函数，在子进程中加载模型、运行 Wanda 剪枝，并返回 loss
 def evaluate_pruning(pruning_params, args, model_path, cache_dir, tokenizer, inputs):
+    print("Subprocess: Loading model...", flush=True)
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
         cache_dir=cache_dir,
         device_map="auto",
-        torch_dtype=torch.float16
+        torch_dtype=torch.bfloat16
     )
     model.seqlen = model.config.max_position_embeddings
+    print("Subprocess: Model loaded.", flush=True)
     dataloader, _ = get_loaders("c4", nsamples=args.nsamples, seed=args.seed,
                                  seqlen=model.seqlen, tokenizer=tokenizer)
+    print("Subprocess: Loading calibration data...", flush=True)
     with torch.no_grad():
         if "OPT" in model.__class__.__name__:
             cal_data = prepare_calibration_input_opt(model, dataloader, "cpu", args.nsamples)
         else:
             cal_data = prepare_calibration_input(model, dataloader, "cpu", args.nsamples)
+    print("Subprocess: Calibration data loaded.", flush=True)
     prune_wanda_ww_cached(args, model, tokenizer, "cuda", prune_ratios=pruning_params, cal_data=cal_data)
     with torch.no_grad():
         outputs = model(**inputs, labels=inputs["input_ids"])
         loss = outputs.loss.item()
+    print("Subprocess: Evaluation finished. Loss =", loss, flush=True)
     return loss
+
+#############################################
+# 定义一个回调函数跟踪训练进度
+
+class ProgressCallback(BaseCallback):
+    def __init__(self, verbose=0):
+        super(ProgressCallback, self).__init__(verbose)
+        self.episode_count = 0
+    def _on_rollout_end(self) -> None:
+        self.episode_count += 1
+        print(f"Rollout {self.episode_count} finished at step {self.num_timesteps}.", flush=True)
 
 #############################################
 # RL 环境：每个 episode 通过子进程运行剪枝评估
@@ -232,7 +256,7 @@ class PruningEnv(gym.Env):
     """
     RL 环境：
       - 每个 episode 通过子进程运行 evaluate_pruning() 来完成剪枝评估，
-        每次都完全独立加载模型、运行 Wanda 剪枝，结束后子进程退出释放显存。
+        每次都独立加载模型、运行 Wanda 剪枝，结束后子进程退出释放显存。
       - RL 动作为每层的 ESD 权重（用于融合 ESD 和 GradNorm）。
     """
     def __init__(self, model_path, esd_ratios, importance_scores, args, tokenizer, device, inputs, base_loss, cache_dir):
@@ -271,6 +295,8 @@ class PruningEnv(gym.Env):
 #############################################
 # 主程序
 if __name__ == "__main__":
+    mp.set_start_method("spawn", force=True)
+    
     parser = argparse.ArgumentParser()
     parser.add_argument('--model', type=str, default="pinkmanlove/llama-7b-hf", help="LLaMA 模型路径")
     parser.add_argument('--cache_dir', type=str, default="/root/autodl-tmp/llm_weights", help="模型缓存路径")
@@ -306,7 +332,7 @@ if __name__ == "__main__":
     with torch.no_grad():
         outputs = model(**inputs, labels=inputs["input_ids"])
         base_loss = outputs.loss.item()
-    print(f"🚀 剪枝前 LLaMA-7B 在 TinyStories Loss: {base_loss:.6f}")
+    print(f"🚀 剪枝前 LLaMA-7B 在 TinyStories Loss: {base_loss:.6f}", flush=True)
     
     esd_ratios = np.array([
         0.57042164, 0.61759788, 0.63153112, 0.63073802, 0.65285629, 0.6482451,
@@ -325,14 +351,14 @@ if __name__ == "__main__":
         0.7545204,  0.764797
     ])
     
-    # 创建 RL 环境，每个 episode 都在独立子进程中执行评估
+    # 创建 RL 环境，每个 episode 通过子进程独立执行评估
     env = PruningEnv(model_path, esd_ratios, importance_scores, args, tokenizer, device, inputs, base_loss, cache_dir)
-    # 让 PPO 策略网络在 CPU 上运行
+    callback = ProgressCallback(verbose=1)
     model_rl = PPO("MlpPolicy", env, verbose=1, device='cpu')
-    model_rl.learn(total_timesteps=5000)
+    model_rl.learn(total_timesteps=5000, callback=callback)
     
     best_action = model_rl.predict(env.reset())[0]
-    print(f"🚀 最优 ESD 权重（每层）: {best_action}")
+    print(f"🚀 最优 ESD 权重（每层）: {best_action}", flush=True)
     final_pruning_ratios = best_action * esd_ratios + (1 - best_action) * importance_scores
-    print("🔥 RL 计算的最终剪枝比例:", final_pruning_ratios)
+    print("🔥 RL 计算的最终剪枝比例:", final_pruning_ratios, flush=True)
     np.save("final_pruning_ratios_rl.npy", final_pruning_ratios)
