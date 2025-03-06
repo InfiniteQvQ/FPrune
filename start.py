@@ -46,7 +46,7 @@ def main():
     parser.add_argument("--mapping_type", default="block_wise", type=str, help="mapping type for pruning ratios allocation.")
     # evaluation benchmark
     parser.add_argument("--eval_zero_shot", action="store_true", help="evaluation on zero-shot tasks.")
-    parser.add_argument("--eval_wikitext", type=bool, default=True, help="evaluation on wikitext.")
+    parser.add_argument("--eval_wikitext", type=bool, default=False, help="evaluation on wikitext.")
    
     args = parser.parse_args()
     
