@@ -337,8 +337,7 @@ class EvolutionStrategy:
 
         for gen in progress_bar:
             noise = np.random.randn(self.population_size, self.num_layers)  # 生成噪声
-
-            population = weights_np + self.sigma * noise  # 生成新种群
+            population = np.array(weights_np) + self.sigma * noise  # 确保是 NumPy 数组
 
             rewards = np.zeros(self.population_size)
             for i in range(self.population_size):
@@ -346,15 +345,25 @@ class EvolutionStrategy:
                 rewards[i] = -loss  # 目标是最小化 loss
                 torch.cuda.empty_cache()
 
-            rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
-            gradient = np.dot(noise.T, rewards) / self.population_size  # 计算梯度
-            print("gradient", gradient)
-            print("reward: ", rewards)
-            # ✅ 确保 gradient 是 NumPy 数组
-            gradient = gradient.cpu().numpy() if isinstance(gradient, torch.Tensor) else gradient
+            print("🔹 rewards before normalization:", rewards)
+            print("🔹 rewards mean:", rewards.mean(), "std:", rewards.std())
 
-            # ✅ 进行 weights 更新
-            weights_np += self.alpha * gradient
+            if rewards.std() < 1e-6:  # 避免 NaN
+                print("⚠️ Warning: rewards.std() is too small, skipping update")
+                continue
+
+            rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
+
+            print("🔹 rewards after normalization:", rewards)
+
+            gradient = np.dot(noise.T, rewards) / self.population_size
+            if np.isnan(gradient).any():
+                print("❌ Gradient contains NaN values! Skipping this update.")
+                continue
+
+            print("🔹 gradient:", gradient)
+
+            weights_np += self.alpha * gradient  # 更新权重
 
             # ✅ 重新转换为 PyTorch Tensor，放回 CUDA
             weights = torch.tensor(weights_np, dtype=torch.float32, device=self.device)
@@ -362,7 +371,7 @@ class EvolutionStrategy:
             # 计算当前 generation 的最终 loss
             loss, final_weights = self.env.evaluate_loss(weights)
 
-            # ✅ 直接打印 Loss 和参数（限制小数点后 4 位）
+            # ✅ 直接打印 Loss 和参数（限制 4 位小数）
             print(f"\n🌀 Generation {gen+1}/{self.generations} | Loss: {loss:.6f}")
             print("📌 Layer Weights:", np.round(weights.cpu().numpy(), 4))  # 限制 4 位小数
             print("-" * 60)  # 让日志更清晰
@@ -375,6 +384,7 @@ class EvolutionStrategy:
             progress_bar.refresh()
 
         return best_weights, best_loss
+
 
 
 
