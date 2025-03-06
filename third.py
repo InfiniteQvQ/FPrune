@@ -60,7 +60,7 @@ for name, module in model.named_modules():
             original_alphas[name] = alpha_val
             print(f"Layer: {name}, original alpha: {alpha_val}")
 
-epsilon = 1e-4
+epsilon = 1e-6
 print("Perturbing model parameters with epsilon =", epsilon)
 with torch.no_grad():
     for param in model.parameters():
