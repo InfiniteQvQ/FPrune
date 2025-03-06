@@ -656,8 +656,6 @@ def ww_sparsity_llama_rl(args, model, device=torch.device("cuda:0"),
     }
     esd_ratios = np.array([layerwise_pruning_ratios_esd])
 
-    esd_matrix = esd_ratios.reshape(7, 32)
-
     # 分区定义：键为分区编号，值为对应的层索引列表
     segments = {
         0: [0],
@@ -680,8 +678,21 @@ def ww_sparsity_llama_rl(args, model, device=torch.device("cuda:0"),
 
     # 对于每个分区，计算该分区所有层（每层 7 个值）的平均值，
     # 并将该分区内对应的所有 1D 数组元素都设为这个平均值
+    res = []
+    cur_pointer = 0
     for seg, l in segments.items():
-        print(l)
+        len = len(l)
+        cur = 0
+        
+        for i in range(len):
+            cur += esd_ratios[cur_pointer * 7]
+            cur_pointer += 1
+        cur /= len
+        for j in range(7):
+            res.append(cur)
+    print(res)
+        
+
        
 
 
@@ -694,7 +705,7 @@ def ww_sparsity_llama_rl(args, model, device=torch.device("cuda:0"),
     #final_pruning_ratios = weight_esd * np.array(layerwise_pruning_ratios_esd) + (1-weight_esd) * res
     #print("🔥 最终剪枝比例:", final_pruning_ratios)
     #print("all mean: ", np.mean(final_pruning_ratios))
-    return segmented_ratios
+    return res
 
 def ww_sparsity_llama2_7b_split(args, model, device=torch.device("cuda:0"),
                                 s1=0.8, s2=1.2, ratios=None, prune_n=0, prune_m=0,
