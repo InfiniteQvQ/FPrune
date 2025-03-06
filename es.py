@@ -250,56 +250,51 @@ class LayerPruningOptimization:
     def __init__(self, model_path, cache_dir, dataset, tokenizer, esd_ratios, importance_scores, args):
         self.model_path = model_path
         self.cache_dir = cache_dir
-        self.dataset = dataset
+        self.dataset = dataset  # 此处使用 openwebtext 或 TinyStories 均可，根据需要调整
         self.tokenizer = tokenizer
         self.num_layers = len(esd_ratios)
         self.esd_ratios = esd_ratios
         self.importance_scores = importance_scores
         self.args = args
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print("📥 Loading evaluation dataset...")
+        # 使用 OpenWebText 数据集（也可以修改为你想要的数据集）
+        self.dataset = load_dataset("openwebtext", split="train[:1%]")  # 只加载1%的数据以加快速度
+        print(f"✅ Evaluation dataset loaded, total samples: {len(self.dataset)}")
 
     def evaluate_loss(self, weights):
-        """计算当前 `weights` (混合比例) 下剪枝后模型的 loss"""
-
+        """计算当前 weights 下剪枝后模型的 loss"""
         torch.cuda.empty_cache()
         torch.cuda.ipc_collect()
 
-        weights_np = weights.cpu().numpy() if isinstance(weights, torch.Tensor) else weights  # 确保是 NumPy 数组
+        # 确保 weights 是 NumPy 数组
+        weights_np = weights.cpu().numpy() if isinstance(weights, torch.Tensor) else weights
 
         esd_contrib = self.esd_ratios * weights_np
         imp_contrib = self.importance_scores * (1 - weights_np)
-        layer_weights = esd_contrib + imp_contrib  # 计算最终混合权重
-
-        # ✅ 确保 layer_weights 仍然是 NumPy 数组
+        layer_weights = esd_contrib + imp_contrib
         layer_weights = layer_weights.astype(np.float32)
 
-        # 加载 LLM 模型
+        # 加载剪枝前的模型
         model = get_llm(self.model_path, self.cache_dir)
-      
-    
 
         try:
-   
+            # 对模型执行剪枝操作
             prune_wanda(self.args, model, self.tokenizer, self.device, ratios=layer_weights)
-           
-            
 
-            # 评估剪枝后 loss
-            sample_texts = random.sample(self.dataset, 100)
-            #sample_texts = [self.dataset[i]["text"] for i in range(100)]
+            # 随机抽取 100 个样本进行评估
+            sample_texts = random.sample([item["text"] for item in self.dataset], 100)
             inputs = self.tokenizer(sample_texts, return_tensors="pt", padding=True, truncation=True, max_length=256)
             inputs = {k: v.to(model.device) for k, v in inputs.items()}
 
             with torch.no_grad():
                 outputs = model(**inputs, labels=inputs["input_ids"])
                 loss = outputs.loss.item()
-                print(f"📉 Generation Loss History: {loss:.6f}")
-
+            print(f"📉 Eval Loss: {loss:.6f}")
         except Exception as e:
             print(f"❌ Evaluation failed: {e}")
-            loss = float("inf")  # 避免异常导致 ES 失败
+            loss = float("inf")
         finally:
-            # 释放模型
             del model
             torch.cuda.empty_cache()
             torch.cuda.ipc_collect()
@@ -322,13 +317,12 @@ class EvolutionStrategy:
         self.alpha = alpha
         self.generations = generations
         self.num_layers = env.num_layers
-        
-        # ✅ 解决方案：添加 self.device
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     def optimize(self):
-        """ 运行进化策略进行优化 """
-        weights_np = 0.8 * self.env.esd_ratios + 0.2 * self.env.importance_scores  # 计算初始权重
+        """运行进化策略进行优化"""
+        # 从经验值 (80% esd, 20% importance) 初始化权重（NumPy 数组）
+        weights_np = 0.8 * self.env.esd_ratios + 0.2 * self.env.importance_scores
         best_loss = float("inf")
         best_weights = weights_np
 
@@ -337,44 +331,38 @@ class EvolutionStrategy:
 
         for gen in progress_bar:
             noise = np.random.randn(self.population_size, self.num_layers)  # 生成噪声
-            population = np.array(weights_np) + self.sigma * noise  # 确保是 NumPy 数组
+            population = np.array(weights_np) + self.sigma * noise
 
             rewards = np.zeros(self.population_size)
             for i in range(self.population_size):
-                loss, _ = self.env.evaluate_loss(population[i])  # 计算当前个体的 loss
+                loss, _ = self.env.evaluate_loss(population[i])
                 rewards[i] = -loss  # 目标是最小化 loss
                 torch.cuda.empty_cache()
 
             print("🔹 rewards before normalization:", rewards)
             print("🔹 rewards mean:", rewards.mean(), "std:", rewards.std())
-
-            if rewards.std() < 1e-6:  # 避免 NaN
+            if rewards.std() < 1e-6:
                 print("⚠️ Warning: rewards.std() is too small, skipping update")
                 continue
 
             rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
-
             print("🔹 rewards after normalization:", rewards)
 
             gradient = np.dot(noise.T, rewards) / self.population_size
             if np.isnan(gradient).any():
                 print("❌ Gradient contains NaN values! Skipping this update.")
                 continue
-
             print("🔹 gradient:", gradient)
 
-            weights_np += self.alpha * gradient  # 更新权重
+            weights_np += self.alpha * gradient
 
-            # ✅ 重新转换为 PyTorch Tensor，放回 CUDA
+            # 重新转换为 PyTorch Tensor
             weights = torch.tensor(weights_np, dtype=torch.float32, device=self.device)
 
-            # 计算当前 generation 的最终 loss
             loss, final_weights = self.env.evaluate_loss(weights)
-
-            # ✅ 直接打印 Loss 和参数（限制 4 位小数）
             print(f"\n🌀 Generation {gen+1}/{self.generations} | Loss: {loss:.6f}")
-            print("📌 Layer Weights:", np.round(weights.cpu().numpy(), 4))  # 限制 4 位小数
-            print("-" * 60)  # 让日志更清晰
+            print("📌 Layer Weights:", np.round(weights.cpu().numpy(), 4))
+            print("-" * 60)
 
             if loss < best_loss:
                 best_loss = loss
