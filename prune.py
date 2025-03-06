@@ -607,7 +607,7 @@ def ww_sparsity_llama_7b_split(args, model, device=torch.device("cuda:0"),
     
 def ww_sparsity_llama_rl(args, model, device=torch.device("cuda:0"),
                                 s1=0.8, s2=1.2, ratios=None, prune_n=0, prune_m=0,
-                                weight_esd=0.8, eps=1e-8):
+                                weight_esd=0.95, eps=1e-8):
     if "opt" in args.model:
         blocks = model.model.decoder.layers    
     else:
@@ -638,25 +638,7 @@ def ww_sparsity_llama_rl(args, model, device=torch.device("cuda:0"),
     layerwise_pruning_ratios_esd = layerwise_pruning_ratios_esd * scaler
     layerwise_pruning_ratios_esd = layerwise_pruning_ratios_esd.cpu().numpy().tolist()
     print("ESD-based ratios:", layerwise_pruning_ratios_esd)
-    segments = {
-        0: [0],
-        1: [1],
-        2: [2],
-        3: [3],
-        4: [4, 5, 6, 7, 8, 9, 10, 11],
-        5: [12, 13, 14],
-        6: [15, 16, 17],
-        7: [18, 19, 20],
-        8: [21, 22, 23],
-        9: [24, 25],
-        10: [26, 27],
-        11: [28, 29],
-        12: [30],
-        13: [31]
-    }
-   
 
-    # 分区定义：键为分区编号，值为对应的层索引列表
     segments = {
         0: [0],
         1: [1],
@@ -675,8 +657,6 @@ def ww_sparsity_llama_rl(args, model, device=torch.device("cuda:0"),
     }
 
 
-    # 对于每个分区，计算该分区所有层（每层 7 个值）的平均值，
-    # 并将该分区内对应的所有 1D 数组元素都设为这个平均值
     res = []
     cur_pointer = 0
     for seg, l in segments.items():
