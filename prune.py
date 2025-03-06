@@ -654,6 +654,7 @@ def ww_sparsity_llama_rl(args, model, device=torch.device("cuda:0"),
         12: [30],
         13: [31]
     }
+    layerwise_pruning_ratios_esd  = np.array(layerwise_pruning_ratios_esd)
     esd_transposed = layerwise_pruning_ratios_esd.T
     segmented_ratios = esd_transposed.copy()
     for seg, layers in segments.items():
