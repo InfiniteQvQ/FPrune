@@ -687,8 +687,9 @@ def ww_sparsity_llama_rl(args, model, device=torch.device("cuda:0"),
             cur += layerwise_pruning_ratios_esd[cur_pointer * 7]
             cur_pointer += 1
         cur /= lens
-        for j in range(7):
-            res.append(cur)
+        for i in range(lens):
+            for j in range(7):
+                res.append(cur)
     print(res)
         
 
