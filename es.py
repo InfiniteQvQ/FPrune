@@ -9,7 +9,7 @@ from scipy.stats import norm
 from lib.data import get_loaders
 from lib.layerwrapper import WrappedGPT
 from tqdm import tqdm
-
+import random
 # ========== 1. 获取 LLM 模型 ==========
 # 工具函数：递归查找指定类型的层
 def find_layers(module, layers=[nn.Linear], name=''):
@@ -285,7 +285,8 @@ class LayerPruningOptimization:
             
 
             # 评估剪枝后 loss
-            sample_texts = [self.dataset[i]["text"] for i in range(100)]
+            sample_texts = random.sample(self.dataset, 100)
+            #sample_texts = [self.dataset[i]["text"] for i in range(100)]
             inputs = self.tokenizer(sample_texts, return_tensors="pt", padding=True, truncation=True, max_length=256)
             inputs = {k: v.to(model.device) for k, v in inputs.items()}
 
@@ -424,7 +425,7 @@ if __name__ == "__main__":
     env = LayerPruningOptimization(model_path, cache_dir, dataset, tokenizer, esd_ratios, importance_scores, args)
     print("env done")
     # 运行进化策略优化
-    es = EvolutionStrategy(env, population_size=1, sigma=0.3, alpha=0.07, generations=5)
+    es = EvolutionStrategy(env, population_size=2, sigma=0.3, alpha=0.07, generations=5)
     
     best_weights, best_loss = es.optimize()
 
