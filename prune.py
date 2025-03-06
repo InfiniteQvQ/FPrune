@@ -654,22 +654,19 @@ def ww_sparsity_llama_rl(args, model, device=torch.device("cuda:0"),
         12: [30],
         13: [31]
     }
-    layerwise_pruning_ratios_esd  = np.array(layerwise_pruning_ratios_esd)
-    esd_transposed = layerwise_pruning_ratios_esd.T
-    segmented_ratios = esd_transposed.copy()
-    for seg, layers in segments.items():
-        avg_values = np.mean([esd_transposed[layer] for layer in layers], axis=0)  # 计算该分区的平均值
-        for layer in layers:
-            segmented_ratios[layer] = avg_values  # 赋值给该分区的所有层
+  
+    layerwise_pruning_ratios_esd = np.array(layerwise_pruning_ratios_esd).reshape(7, 32)
+    segmented_ratios = layerwise_pruning_ratios_esd.copy()
 
-    # 转回 7×32 形状
-    segmented_ratios = segmented_ratios.T
+    for seg, layers in segments.items():
+        avg_value = np.mean(layerwise_pruning_ratios_esd[:, layers])  # 计算分区的均值
+        segmented_ratios[:, layers] = avg_value 
 
     # 输出结果
   
             
      
-    print(segmented_ratios)
+    print("Segmented ESD-based ratios:", segmented_ratios)
     #b = np.array([0.7003036737442017, 0.6655532121658325, 0.7393957376480103, 0.8427770137786865, 0.6547543406486511, 0.7298241853713989, 0.7096095681190491, 0.7544902563095093, 0.6928205490112305, 0.5879737734794617, 0.7208297252655029, 0.7269023656845093, 0.5967667102813721, 0.7670202255249023, 0.7825360298156738, 0.6979405879974365, 0.7198771834373474, 0.717486560344696, 0.6833314299583435, 0.6722944378852844, 0.8652265071868896, 0.6793380379676819, 0.7010731101036072, 0.6536277532577515, 0.6648387908935547, 0.7048466801643372, 0.6144991517066956, 0.7443692088127136, 0.5768176913261414, 0.6605796813964844, 0.6343473792076111, 0.7379485368728638])
     #res = []
     #for i in b:
