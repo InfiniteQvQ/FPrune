@@ -656,30 +656,47 @@ def ww_sparsity_llama_rl(args, model, device=torch.device("cuda:0"),
     }
     esd_ratios = np.array([layerwise_pruning_ratios_esd])
 
-    segmented_ratios = esd_ratios.copy()
-    for seg, layers in segments.items():
-        # 获取分区内的所有索引
-        all_indices = []
-        for layer in layers:
-            start_idx = layer * 7
-            end_idx = start_idx + 7
-            if end_idx > len(esd_ratios):  # 确保索引不会越界
-                print(f"Warning: Layer {layer} index range ({start_idx}, {end_idx}) exceeds esd_ratios size ({len(esd_ratios)})")
-                continue
-            all_indices.extend(range(start_idx, end_idx))
+    esd_matrix = esd_ratios.reshape(7, 32)
 
-        # 如果该分区没有有效索引，则跳过
-        if not all_indices:
-            continue
+    # 分区定义：键为分区编号，值为对应的层索引列表
+    segments = {
+        0: [0],
+        1: [1],
+        2: [2],
+        3: [3],
+        4: [4, 5, 6, 7, 8, 9, 10, 11],
+        5: [12, 13, 14],
+        6: [15, 16, 17],
+        7: [18, 19, 20],
+        8: [21, 22, 23],
+        9: [24, 25],
+        10: [26, 27],
+        11: [28, 29],
+        12: [30],
+        13: [31]
+    }
 
-        # 计算该分区的平均值
-        avg_value = np.mean([esd_ratios[idx] for idx in all_indices])
+    # 创建一个副本用于存储分区平均后的矩阵
+    segmented_matrix = esd_matrix.copy()
 
-        # 赋值
-        for idx in all_indices:
-            segmented_ratios[idx] = avg_value
+    # 对于每个分区，将该分区内所有层的值都设为它们的平均值
+    for seg, cols in segments.items():
+        avg_val = np.mean(esd_matrix[:, cols])
+        segmented_matrix[:, cols] = avg_val
 
+    # 如果需要将结果展平为 1D 数组
+    segmented_ratios = segmented_matrix.flatten()
+
+    # 输出结果
+    print("Segmented ESD-based ratios:")
     print(segmented_ratios)
+
+    # 可选：检查每个分区的唯一值，确认它们是否已平均
+    for seg, cols in segments.items():
+        unique_val = np.unique(segmented_matrix[:, cols])
+        print(f"Segment {seg} (columns {cols}) unique value: {unique_val}")
+
+
   
             
      
