@@ -654,15 +654,23 @@ def ww_sparsity_llama_rl(args, model, device=torch.device("cuda:0"),
         12: [30],
         13: [31]
     }
-  
-    layerwise_pruning_ratios_esd = np.array(layerwise_pruning_ratios_esd).reshape(7, 32)
-    segmented_ratios = layerwise_pruning_ratios_esd.copy()
+    esd_ratios = np.array([layerwise_pruning_ratios_esd])
 
+    segmented_ratios = esd_ratios.copy()
     for seg, layers in segments.items():
-        avg_value = np.mean(layerwise_pruning_ratios_esd[:, layers])  # 计算分区的均值
-        segmented_ratios[:, layers] = avg_value 
+        # 获取分区内的所有索引
+        all_indices = []
+        for layer in layers:
+            all_indices.extend(range(layer * 7, (layer + 1) * 7))  # 每个 layer 占 7 个索引
 
-    # 输出结果
+        # 计算该分区的平均值
+        avg_value = np.mean([esd_ratios[idx] for idx in all_indices])
+
+        # 赋值
+        for idx in all_indices:
+            segmented_ratios[idx] = avg_value
+
+    print(segmented_ratios)
   
             
      
