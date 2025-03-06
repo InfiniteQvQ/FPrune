@@ -680,8 +680,8 @@ def ww_sparsity_llama_rl(args, model, device=torch.device("cuda:0"),
 
     # 对于每个分区，计算该分区所有层（每层 7 个值）的平均值，
     # 并将该分区内对应的所有 1D 数组元素都设为这个平均值
-    for seg, layers in segments.items():
-        print(seg)
+    for seg, l in segments.items():
+        print(l)
        
 
 
