@@ -607,7 +607,7 @@ def ww_sparsity_llama_7b_split(args, model, device=torch.device("cuda:0"),
     
 def ww_sparsity_llama_rl(args, model, device=torch.device("cuda:0"),
                                 s1=0.8, s2=1.2, ratios=None, prune_n=0, prune_m=0,
-                                weight_esd=0.98, eps=1e-8):
+                                weight_esd=0.8, eps=1e-8):
     if "opt" in args.model:
         blocks = model.model.decoder.layers    
     else:
@@ -651,7 +651,7 @@ def ww_sparsity_llama_rl(args, model, device=torch.device("cuda:0"),
         for j in range(7):
             res.append(i)
     res= np.array(res)
-    final_pruning_ratios = weight_esd * np.array(layerwise_pruning_ratios_esd) + (1-weight_esd) * a
+    final_pruning_ratios = weight_esd * np.array(layerwise_pruning_ratios_esd) + (1-weight_esd) * res
     print("🔥 最终剪枝比例:", final_pruning_ratios)
     print("all mean: ", np.mean(final_pruning_ratios))
     return final_pruning_ratios
