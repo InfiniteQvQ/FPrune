@@ -605,7 +605,30 @@ def ww_sparsity_llama_7b_split(args, model, device=torch.device("cuda:0"),
     print("all mean: ", np.mean(final_pruning_ratios))
     return final_pruning_ratios
     
-   
+def ww_sparsity_llama_rl(args, model, device=torch.device("cuda:0"),
+                                s1=0.8, s2=1.2, ratios=None, prune_n=0, prune_m=0,
+                                weight_esd=0.98, eps=1e-8):
+    a = np.array([
+        0.24685764, 0.44864228, 0.63479954, 0.64638   , 0.6746562 ,
+        0.66782725, 0.654787  , 0.6305382 , 0.6453414 , 0.6237143 ,
+        0.6457529 , 0.6432609 , 0.6473248 , 0.65202224, 0.6671497 ,
+        0.6927232 , 0.6879149 , 0.7229782 , 0.781213  , 0.7451096 ,
+        0.7874703 , 0.81332695, 0.765616  , 0.7602534 , 0.80127907,
+        0.83089435, 0.8128073 , 0.81957525, 0.7791941 , 0.8142848 ,
+        0.8191804 , 0.74121743, 0.24685764, 0.44864228, 0.63479954,
+        0.64638   , 0.6746562 , 0.66782725, 0.654787  , 0.6305382 ,
+        0.6453414 , 0.6237143 , 0.6457529 , 0.6432609 , 0.6473248 ,
+        0.65202224, 0.6671497 , 0.6927232 , 0.6879149 , 0.7229782 ,
+        0.781213  , 0.7451096 , 0.7874703 , 0.81332695, 0.765616  ,
+        0.7602534 , 0.80127907, 0.83089435, 0.8128073 , 0.81957525,
+        0.7791941 , 0.8142848 , 0.8191804 , 0.74121743
+    ])
+    res = []
+    for i in a:
+        for j in range(7):
+            res.append(i)
+    return np.array(res)
+
 def ww_sparsity_llama2_7b_split(args, model, device=torch.device("cuda:0"),
                                 s1=0.8, s2=1.2, ratios=None, prune_n=0, prune_m=0,
                                 weight_esd=0.8, eps=1e-8):
@@ -1190,7 +1213,7 @@ def prune_wanda_ww2(args, model, tokenizer, device=torch.device("cuda:0"), prune
     s1 = 1.0 - args.epsilon
     s2 = 1.0 + args.epsilon
 
-    all_layer_ratio = ww_sparsity_llama_7b_split(args, model, device, s1, s2)
+    all_layer_ratio = ww_sparsity_llama_rl(args, model, device, s1, s2)
     # wanda pruning
     prune_wanda(args, model, tokenizer, device, ratios=all_layer_ratio)   
     
