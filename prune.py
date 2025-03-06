@@ -681,13 +681,13 @@ def ww_sparsity_llama_rl(args, model, device=torch.device("cuda:0"),
     res = []
     cur_pointer = 0
     for seg, l in segments.items():
-        len = len(l)
+        lens = len(l)
         cur = 0
         
-        for i in range(len):
+        for i in range(lens):
             cur += esd_ratios[cur_pointer * 7]
             cur_pointer += 1
-        cur /= len
+        cur /= lens
         for j in range(7):
             res.append(cur)
     print(res)
