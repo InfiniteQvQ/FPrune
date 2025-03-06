@@ -608,6 +608,10 @@ def ww_sparsity_llama_7b_split(args, model, device=torch.device("cuda:0"),
 def ww_sparsity_llama_rl(args, model, device=torch.device("cuda:0"),
                                 s1=0.8, s2=1.2, ratios=None, prune_n=0, prune_m=0,
                                 weight_esd=0.98, eps=1e-8):
+    if "opt" in args.model:
+        blocks = model.model.decoder.layers    
+    else:
+        blocks = model.model.layers
     layers = [find_layers(blocks)]
     prunables = []
     for layer in layers:
