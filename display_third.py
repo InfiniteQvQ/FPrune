@@ -48,3 +48,4 @@ layerwise_pruning_ratios_esd = layerwise_pruning_ratios_esd.tolist()
 
 # 输出剪枝比例
 print("ESD-based pruning ratios:", layerwise_pruning_ratios_esd)
+print(np.mean(layerwise_pruning_ratios_esd))
