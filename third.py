@@ -8,9 +8,11 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 model_name = "pinkmanlove/llama-7b-hf"  # 示例模型名称
 
 print("Loading model...")
+cache_dir = "/root/autodl-tmp/llm_weights"
 model = AutoModelForCausalLM.from_pretrained(
-    model_name,
-    device_map="auto",
+    "pinkmanlove/llama-7b-hf",
+    cache_dir=cache_dir,
+    device_map="auto",  # 让 Hugging Face 自动分配多个 GPU
     torch_dtype=torch.float16
 )
 model.eval()
