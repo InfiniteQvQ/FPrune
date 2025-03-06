@@ -421,7 +421,7 @@ if __name__ == "__main__":
     env = LayerPruningOptimization(model_path, cache_dir, dataset, tokenizer, esd_ratios, importance_scores, args)
     print("env done")
     # 运行进化策略优化
-    es = EvolutionStrategy(env, population_size=10, sigma=0.1, alpha=0.05, generations=5)
+    es = EvolutionStrategy(env, population_size=20, sigma=0.1, alpha=0.05, generations=10)
     
     best_weights, best_loss = es.optimize()
 
