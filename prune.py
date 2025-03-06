@@ -1274,7 +1274,7 @@ def prune_magnitude_ww2(args, model, tokenizer, device=torch.device("cuda:0"), p
     s1 = 1.0 - args.epsilon
     s2 = 1.0 + args.epsilon
     
-    all_layer_ratio = ww_sparsity_llama_7b_split(args, model, device, s1, s2)
+    all_layer_ratio = ww_sparsity_llama_rl(args, model, device, s1, s2)
     # magnitude pruning
     prune_magnitude(args, model, tokenizer, device, ratios=all_layer_ratio)
     
@@ -1307,6 +1307,6 @@ def prune_sparsegpt_ww2(args, model, tokenizer, device=torch.device("cuda:0"), p
     s1 = 1.0 - args.epsilon
     s2 = 1.0 + args.epsilon
 
-    all_layer_ratio = ww_sparsity_llama_7b_split(args, model, device, s1, s2)
+    all_layer_ratio = ww_sparsity_llama_rl(args, model, device, s1, s2)
     # sparsegpt pruning
     prune_sparsegpt(args, model, tokenizer, device, ratios=all_layer_ratio)
