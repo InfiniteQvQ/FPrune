@@ -257,8 +257,6 @@ class LayerPruningOptimization:
         self.importance_scores = importance_scores
         self.args = args
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        print("📥 Loading evaluation dataset...")
-        # 使用 OpenWebText 数据集（也可以修改为你想要的数据集）
 
         print(f"✅ Evaluation dataset loaded, total samples: {len(self.dataset)}")
 
@@ -423,7 +421,7 @@ if __name__ == "__main__":
     env = LayerPruningOptimization(model_path, cache_dir, dataset, tokenizer, esd_ratios, importance_scores, args)
     print("env done")
     # 运行进化策略优化
-    es = EvolutionStrategy(env, population_size=2, sigma=0.3, alpha=0.07, generations=5)
+    es = EvolutionStrategy(env, population_size=10, sigma=0.1, alpha=0.05, generations=5)
     
     best_weights, best_loss = es.optimize()
 
