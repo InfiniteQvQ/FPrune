@@ -661,7 +661,16 @@ def ww_sparsity_llama_rl(args, model, device=torch.device("cuda:0"),
         # 获取分区内的所有索引
         all_indices = []
         for layer in layers:
-            all_indices.extend(range(layer * 7, (layer + 1) * 7))  # 每个 layer 占 7 个索引
+            start_idx = layer * 7
+            end_idx = start_idx + 7
+            if end_idx > len(esd_ratios):  # 确保索引不会越界
+                print(f"Warning: Layer {layer} index range ({start_idx}, {end_idx}) exceeds esd_ratios size ({len(esd_ratios)})")
+                continue
+            all_indices.extend(range(start_idx, end_idx))
+
+        # 如果该分区没有有效索引，则跳过
+        if not all_indices:
+            continue
 
         # 计算该分区的平均值
         avg_value = np.mean([esd_ratios[idx] for idx in all_indices])
