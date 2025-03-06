@@ -259,7 +259,7 @@ class LayerPruningOptimization:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print("📥 Loading evaluation dataset...")
         # 使用 OpenWebText 数据集（也可以修改为你想要的数据集）
-        self.dataset = load_dataset("openwebtext", split="train[:1%]")  # 只加载1%的数据以加快速度
+
         print(f"✅ Evaluation dataset loaded, total samples: {len(self.dataset)}")
 
     def evaluate_loss(self, weights):
