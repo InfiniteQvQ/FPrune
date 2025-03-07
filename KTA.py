@@ -2,7 +2,7 @@ import torch
 import numpy as np
 from transformers import LlamaModel, AutoTokenizer
 
-def compute_KTA_approx(H, T, sample_size=100):
+def compute_KTA_approx(H, T, sample_size=1000):
     """
     采用采样方式计算 KTA，减少矩阵尺寸，从而降低数值溢出风险。
     
