@@ -14,6 +14,9 @@ def compute_KTA_approx(H, T, sample_size=512):
     H_sample = H[sample_idx, :]
     T_sample = T[np.ix_(sample_idx, sample_idx)]  # 保证形状匹配
 
+    # **修正：转换为 float32，避免 NumPy SVD 不支持 float16**
+    H_sample = H_sample.astype(np.float32)
+
     # **SVD 降维减少数值溢出**
     U, S, Vt = np.linalg.svd(H_sample, full_matrices=False)
     H_sample = U @ np.diag(S)
@@ -27,7 +30,7 @@ def compute_KTA_approx(H, T, sample_size=512):
     K_sample = H_sample @ H_sample.T
 
     # **T_sample 归一化，防止 NaN**
-    T_sample = T_sample.astype(np.float64)
+    T_sample = T_sample.astype(np.float32)
     norm_T = np.linalg.norm(T_sample, axis=1, keepdims=True) + 1e-6
     T_sample = T_sample / norm_T
 
@@ -48,7 +51,7 @@ model = LlamaModel.from_pretrained(
     model_name,
     cache_dir="/root/autodl-tmp/llm_weights",
     output_hidden_states=True,
-    torch_dtype=torch.float16,
+    torch_dtype=torch.float16,  # **仍然使用 float16 进行推理**
     device_map="auto"
 )
 
@@ -69,7 +72,7 @@ for run in range(num_runs):
     seq_len = hidden_states[0].shape[1]
 
     # **保证 T 形状匹配**
-    T = np.eye(seq_len)  
+    T = np.eye(seq_len).astype(np.float32)  # **转换为 float32，防止计算误差**
 
     for layer_idx in range(model.config.num_hidden_layers):
         H = hidden_states[layer_idx][0].cpu().numpy()  # 取 batch 0
