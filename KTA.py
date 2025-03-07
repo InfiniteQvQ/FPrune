@@ -5,24 +5,23 @@ from transformers import AutoModel, AutoTokenizer
 
 def compute_KTA(H, T):
     """ 计算 Kernel Target Alignment (KTA) """
-    H = H.astype(np.float32)  # **确保 H 为 float32，避免 float16 精度问题**
+    H = H.astype(np.float64)  # **使用 float64 以提高精度**
     
     # 归一化 H，防止溢出
-    H_norm = np.linalg.norm(H, axis=1, keepdims=True) + 1e-8
+    H_norm = np.linalg.norm(H, axis=1, keepdims=True) + 1e-12  # **使用更小的 epsilon**
     H = H / H_norm
     H = np.clip(H, -1e6, 1e6)  # 限制 H 的值域，防止溢出
 
     # 计算核矩阵 K 和目标矩阵 T
-    K = H @ H.T  
-    T = T @ T.T  
+    K = np.matmul(H, H.T)  
+    T = np.matmul(T, T.T)  
 
     # 计算 Frobenius 范数
-    K_norm = np.sqrt(np.sum(K**2)) + 1e-8
-    T_norm = np.sqrt(np.sum(T**2)) + 1e-8
+    K_norm = np.sqrt(np.sum(K**2)) + 1e-12
+    T_norm = np.sqrt(np.sum(T**2)) + 1e-12
 
     inner_product = np.sum(K * T)
     return inner_product / (K_norm * T_norm)
-
 
 # **使用 `device_map="auto"` 让 HF 自动分配模型到多个 GPU**
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
