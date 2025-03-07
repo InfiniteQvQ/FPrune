@@ -90,4 +90,9 @@ kta_std = {layer: np.std(values) for layer, values in kta_results.items() if val
 for layer in sorted(kta_mean.keys()):
     print(f"Layer {layer} KTA: {kta_mean[layer]:.4f} ± {kta_std[layer]:.4f}")
 
+
 print("Final KTA Results:", kta_mean)
+res = []
+for i, j in kta_mean.items():
+    res.append(j)
+print(res)
