@@ -451,7 +451,7 @@ def ww_sparsity_llama2_7b(args, model, device=torch.device("cuda:0"),
     layerwise_pruning_ratios_esd = layerwise_pruning_ratios_esd * scaler
     layerwise_pruning_ratios_esd = layerwise_pruning_ratios_esd.cpu().numpy().tolist()
     print("ESD-based ratios:", layerwise_pruning_ratios_esd)
-    return layerwise_pruning_ratios_esd
+   
     segments = {
         0: [0],
         1: [1],
@@ -468,6 +468,23 @@ def ww_sparsity_llama2_7b(args, model, device=torch.device("cuda:0"),
         12: [30],
         13: [31]
     }
+
+    res = []
+    cur_pointer = 0
+    for seg, l in segments.items():
+        lens = len(l)
+        cur = 0
+        
+        for i in range(lens):
+            cur += layerwise_pruning_ratios_esd[cur_pointer * 7]
+            cur_pointer += 1
+        cur /= lens
+        for i in range(lens):
+            for j in range(7):
+                res.append(cur)
+    print(res)
+
+    return res
 def ww_sparsity_llama_7b_split(args, model, device=torch.device("cuda:0"),
                                 s1=0.8, s2=1.2, ratios=None, prune_n=0, prune_m=0,
                                 weight_esd=0.98, eps=1e-8):
