@@ -130,7 +130,7 @@ class SGLPPruner:
         print("[Init] Loading tokenizer:", model_name)
         # 你可以根据实际情况换成适合自己模型的 tokenizer
         tokenizer_name = "meta-llama/Meta-Llama-3-8B"
-        self.tokenizer = LlamaTokenizer.from_pretrained(tokenizer_name)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
 
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
