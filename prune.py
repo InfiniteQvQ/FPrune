@@ -897,7 +897,7 @@ def ww_sparsity_llama3_8b(args, model, device=torch.device("cuda:0"),
     layerwise_pruning_ratios_esd = layerwise_pruning_ratios_esd * scaler
     layerwise_pruning_ratios_esd = layerwise_pruning_ratios_esd.cpu().numpy().tolist()
     print("ESD-based ratios:", layerwise_pruning_ratios_esd)
-    return layerwise_pruning_ratios_esd
+    
     segments = {
         0: [0],
         1: [1, 2, 3, 4, 5, 6],
@@ -914,7 +914,21 @@ def ww_sparsity_llama3_8b(args, model, device=torch.device("cuda:0"),
         12: [30],
         13: [31]
     }
-
+    res = []
+    cur_pointer = 0
+    for seg, l in segments.items():
+        lens = len(l)
+        cur = 0
+        
+        for i in range(lens):
+            cur += layerwise_pruning_ratios_esd[cur_pointer * 7]
+            cur_pointer += 1
+        cur /= lens
+        for i in range(lens):
+            for j in range(7):
+                res.append(cur)
+    print(res)
+    return res
     importance = np.array([16.8750,8.9688,8.9688,8.9688,8.9688,8.9688,8.9688,3.8203,3.8203,3.8203,3.8203,3.8203,3.8203,2.5078,2.5078,
                        2.2188, 1.7943,1.7943,1.7943,1.5469,1.4453,1.2474,1.2474,1.2474, 0.7959,0.7959,0.7959,0.7959,0.5078,0.3516,0.1592,0.1187])
     I_min = np.min(importance)
