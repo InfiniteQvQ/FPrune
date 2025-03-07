@@ -2,65 +2,68 @@ import torch
 import numpy as np
 from transformers import AutoModel, AutoTokenizer
 
+
 def compute_KTA(H, T):
-    """Compute Kernel Target Alignment (KTA)"""
-    H = H.astype(np.float64)  # Ensure float64 to prevent overflow
-    H /= np.linalg.norm(H, axis=1, keepdims=True) + 1e-8  # Normalize and prevent div-by-zero
-    H = np.clip(H, -1e3, 1e3)  # Clip values to avoid overflow
+    """ 计算 Kernel Target Alignment (KTA) """
+    H = H / np.linalg.norm(H, axis=1, keepdims=True)
+    H = np.clip(H, -1e6, 1e6)  # 限制数值范围，防止溢出
 
-    K = H @ H.T  # Compute Kernel matrix K = H * H^T
-    T = T @ T.T  # Compute target kernel matrix
+    # 计算核矩阵 K 和目标矩阵 T
+    K = H @ H.T  
+    T = T @ T.T  
 
-    K_norm = np.sqrt(np.sum(K**2)) + 1e-8  # Prevent div-by-zero
-    T_norm = np.sqrt(np.sum(T**2)) + 1e-8
+    # 计算 Frobenius 范数
+    K_norm = np.sqrt(np.sum(K**2))
+    T_norm = np.sqrt(np.sum(T**2))
 
     inner_product = np.sum(K * T)
+    if np.isnan(K_norm) or np.isnan(T_norm) or K_norm == 0 or T_norm == 0:
+        return 0.0  # 避免 nan 传播
     return inner_product / (K_norm * T_norm)
 
+
+# **使用 `device_map="auto"` 让 HF 自动分配模型到多个 GPU**
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model_name = "meta-llama/Llama-3.2-3b"
-tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+model_name = "pinkmanlove/llama-7b-hf"
+tokenizer = AutoTokenizer.from_pretrained("HuggingFaceM4/llama-7b-tokenizer")
+
 model = AutoModel.from_pretrained(
-    model_name, cache_dir="./llm_weights",
-    output_hidden_states=True, torch_dtype=torch.float16, device_map="auto"
-).to(device)
+    model_name,
+    cache_dir="/root/autodl-tmp/llm_weights",
+    output_hidden_states=True,
+    torch_dtype=torch.float16,
+    device_map="auto"  # **让 HF 自动分配 GPU**
+)
 
-# Get the number of layers correctly
-num_layers = model.config.num_hidden_layers  # Fix: remove len()
-
-# Input text
-text = ["LLaMA 3.2 3B Kernel Target Alignment computation."]
+# 处理输入
+text = ["LLaMA 7B Kernel Target Alignment computation."]
 inputs = tokenizer(text, return_tensors="pt")
-inputs = {key: val.to(device) for key, val in inputs.items()}
+inputs = {key: val.to(device) for key, val in inputs.items()}  
 
-num_runs = 5  # Number of runs to compute the mean
-seq_len = inputs["input_ids"].shape[1]
+# 计算 KTA 多次平均
+num_runs = 10  
+kta_results = {i: [] for i in range(model.config.num_hidden_layers)}  
 
-kta_results = {layer: [] for layer in range(num_layers)}
-
-for run in range(num_runs):
+for _ in range(num_runs):
     with torch.no_grad():
         outputs = model(**inputs)
-    hidden_states = outputs.hidden_states  # Get all layers
 
-    # Generate consistent labels
-    np.random.seed(42)  
-    labels = np.random.choice([-1, 1], size=(seq_len, 1))
-    T = labels @ labels.T
+    hidden_states = outputs.hidden_states  
+    seq_len = hidden_states[0].shape[1]  
+    labels = np.random.choice([-1, 1], size=(seq_len, seq_len))  
 
-    for layer_idx in range(num_layers):
-        H = hidden_states[layer_idx][0].cpu().numpy()  # Extract batch 0
-        kta_value = compute_KTA(H, T)
+    for layer_idx in range(model.config.num_hidden_layers):
+        H = hidden_states[layer_idx][0].cpu().numpy()  
+        K = H @ H.T  
+        kta_value = compute_KTA(K, labels)
         kta_results[layer_idx].append(kta_value)
 
-# Compute mean and std deviation
-kta_final = {layer: (np.mean(values), np.std(values)) for layer, values in kta_results.items()}
+# 计算平均 KTA
+kta_mean = {layer: np.mean(values) for layer, values in kta_results.items()}
+kta_std = {layer: np.std(values) for layer, values in kta_results.items()}
 
-# Save results
-import json
-with open("KTA_results.json", "w") as f:
-    json.dump(kta_final, f, indent=4)
+for layer in kta_mean:
+    print(f"Layer {layer} KTA: {kta_mean[layer]:.4f} ± {kta_std[layer]:.4f}")
 
-# Print results
-for layer, (mean_kta, std_kta) in kta_final.items():
-    print(f"Layer {layer} KTA: {mean_kta:.4f} ± {std_kta:.4f}")
+print("Final KTA Results:", kta_mean)
