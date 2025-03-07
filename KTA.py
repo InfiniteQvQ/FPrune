@@ -5,20 +5,22 @@ from transformers import AutoModel, AutoTokenizer
 
 def compute_KTA(H, T):
     """ 计算 Kernel Target Alignment (KTA) """
-    H = H / np.linalg.norm(H, axis=1, keepdims=True)
-    H = np.clip(H, -1e6, 1e6)  # 限制数值范围，防止溢出
+    H = H.astype(np.float32)  # **确保 H 为 float32，避免 float16 精度问题**
+    
+    # 归一化 H，防止溢出
+    H_norm = np.linalg.norm(H, axis=1, keepdims=True) + 1e-8
+    H = H / H_norm
+    H = np.clip(H, -1e6, 1e6)  # 限制 H 的值域，防止溢出
 
     # 计算核矩阵 K 和目标矩阵 T
     K = H @ H.T  
     T = T @ T.T  
 
     # 计算 Frobenius 范数
-    K_norm = np.sqrt(np.sum(K**2))
-    T_norm = np.sqrt(np.sum(T**2))
+    K_norm = np.sqrt(np.sum(K**2)) + 1e-8
+    T_norm = np.sqrt(np.sum(T**2)) + 1e-8
 
     inner_product = np.sum(K * T)
-    if np.isnan(K_norm) or np.isnan(T_norm) or K_norm == 0 or T_norm == 0:
-        return 0.0  # 避免 nan 传播
     return inner_product / (K_norm * T_norm)
 
 
