@@ -8,21 +8,21 @@ from transformers import LlamaModel, AutoTokenizer
 def compute_KTA(H, T):
     """ 计算 Kernel Target Alignment (KTA) """
 
-    H = H.astype(np.float64)  # **使用 float64 以提高精度**
-
-    # 归一化 H，防止溢出
-    H_norm = np.linalg.norm(H, axis=1, keepdims=True) + 1e-6  # **更小的 epsilon**
+    H = H.astype(np.float64)  # **使用 float64 提高精度**
+    
+    # **归一化 H，防止溢出**
+    H_norm = np.linalg.norm(H, axis=1, keepdims=True) + 1e-6  # **确保不为 0**
     H = H / H_norm
-    H = np.clip(H, -1e3, 1e3)  # **更小的剪裁范围，防止溢出**
+    H = np.clip(H, -1, 1)  # **限制数值范围，防止极端值影响计算**
 
-    # **计算 `H @ H.T` 时使用 `log-scaling` 防止溢出**
-    H = np.log1p(np.abs(H)) * np.sign(H)  # **使用 `log1p`，防止 `H @ H.T` 过大**
+    # **log-scaling 防止爆炸**
+    H = np.sign(H) * np.log1p(np.abs(H))  
 
-    # 计算核矩阵 K 和目标矩阵 T
+    # **计算核矩阵 K 和目标矩阵 T**
     K = np.matmul(H, H.T)  
     T = np.matmul(T, T.T)  
 
-    # 计算 Frobenius 范数
+    # **计算 Frobenius 范数**
     K_norm = np.sqrt(np.sum(K**2)) + 1e-6
     T_norm = np.sqrt(np.sum(T**2)) + 1e-6
 
