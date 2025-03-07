@@ -452,7 +452,22 @@ def ww_sparsity_llama2_7b(args, model, device=torch.device("cuda:0"),
     layerwise_pruning_ratios_esd = layerwise_pruning_ratios_esd.cpu().numpy().tolist()
     print("ESD-based ratios:", layerwise_pruning_ratios_esd)
     return layerwise_pruning_ratios_esd
-
+    segments = {
+        0: [0],
+        1: [1],
+        2: [2,3],
+        3: [4,5,6,7,8],
+        4: [9, 10, 11, 12, 13, 14],
+        5: [15, 16, 17],
+        6: [18, 19, 20, 21],
+        7: [22, 23, 24],
+        8: [25],
+        9: [26, 27],
+        10: [28],
+        11: [29],
+        12: [30],
+        13: [31]
+    }
 def ww_sparsity_llama_7b_split(args, model, device=torch.device("cuda:0"),
                                 s1=0.8, s2=1.2, ratios=None, prune_n=0, prune_m=0,
                                 weight_esd=0.98, eps=1e-8):
@@ -1235,7 +1250,7 @@ def prune_wanda_ww2(args, model, tokenizer, device=torch.device("cuda:0"), prune
     s1 = 1.0 - args.epsilon
     s2 = 1.0 + args.epsilon
 
-    all_layer_ratio = ww_sparsity_llama_rl(args, model, device, s1, s2)
+    all_layer_ratio = ww_sparsity_llama2_7b(args, model, device, s1, s2)
     # wanda pruning
     prune_wanda(args, model, tokenizer, device, ratios=all_layer_ratio)   
     
