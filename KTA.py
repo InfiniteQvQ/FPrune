@@ -39,6 +39,7 @@ model = AutoModel.from_pretrained(
 # 处理输入
 text = ["LLaMA 7B Kernel Target Alignment computation."]
 inputs = tokenizer(text, return_tensors="pt")
+inputs.pop("token_type_ids", None)
 inputs = {key: val.to(device) for key, val in inputs.items()}  
 
 # 计算 KTA 多次平均
