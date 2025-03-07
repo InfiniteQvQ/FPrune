@@ -262,7 +262,26 @@ def ww_sparsity_llama_32_3b(args, model, device=torch.device("cuda:0"),
             for j in range(7):
                 res.append(cur)
     print(res)
+    k = res
+    res = []
 
+    for i in range(28):
+        #Q
+        res.append(k[i*7] *0.142638 * 7 )
+        #K
+        res.append(k[i*7]  *0.141982 * 7 )
+        #V
+        res.append(k[i*7]  * 0.148107 * 7 )
+        #OUT
+        res.append(k[i*7]  * 0.142638 * 7  )
+        #GATE1
+        res.append(k[i*7]  *0.142795  * 7   )
+        #UP
+        res.append(k[i*7]  *0.142795 * 7  )
+        #DOWN
+
+        res.append(k[i*7]  * 0.142795 * 7  )
+    print(res)
     return res
 
     
@@ -862,41 +881,7 @@ def ww_sparsity_llama3_8b(args, model, device=torch.device("cuda:0"),
                 res.append(cur)
     print(res)
     return res
-    importance = np.array([16.8750,8.9688,8.9688,8.9688,8.9688,8.9688,8.9688,3.8203,3.8203,3.8203,3.8203,3.8203,3.8203,2.5078,2.5078,
-                       2.2188, 1.7943,1.7943,1.7943,1.5469,1.4453,1.2474,1.2474,1.2474, 0.7959,0.7959,0.7959,0.7959,0.5078,0.3516,0.1592,0.1187])
-    I_min = np.min(importance)
-    I_max = np.max(importance)
-    norm_importance = (importance - I_min) / (I_max - I_min)
-    # 反转：重要性越高（数值大）希望剪枝比例越低
-    pre_ratio = 1 - norm_importance
-    avg_pre_ratio = np.mean(pre_ratio)
-    print("Preliminary importance ratios:", pre_ratio)
-    print("Average of importance preliminary ratios:", avg_pre_ratio)
-    target_avg = args.sparsity_ratio  # 这里假设 args.sparsity_ratio 代表全局目标剪枝率（例如0.5）
-    scale_factor = target_avg / avg_pre_ratio
-    final_ratios_importance = pre_ratio * scale_factor
-    final_ratios_importance = np.clip(final_ratios_importance, 0.0, 0.99)
-    # 扩展：每个 transformer 层内有 layer_num_in_block 子层（例如7个）
-    importance_ratios_expanded = []
-    for i in final_ratios_importance:
-        for j in range(layer_num_in_block):
-            importance_ratios_expanded.append(i)
-    print("Importance-based expanded ratios:", importance_ratios_expanded)
-    
-    # ---------------------- 结合两种比例 ----------------------
-    # 这里采用加权平均方式，将 ESD-based 和 importance-based 比例融合
-    # weight_esd 为权重，默认为0.5，两者各占一半
-    if len(layerwise_pruning_ratios_esd) != len(importance_ratios_expanded):
-        raise ValueError("Length mismatch between ESD-based and importance-based ratios!")
-    
-    combined_ratios = []
-    for r_esd, r_imp in zip(layerwise_pruning_ratios_esd, importance_ratios_expanded):
-        combined = weight_esd * r_esd + (1 - weight_esd) * r_imp
-        combined = min(combined, 1.0)
-        combined_ratios.append(combined)
-    
-    print("Combined layerwise pruning ratios:", combined_ratios)
-    return combined_ratios
+ 
 
 def ww_sparsity_llama_7b(args, model, device=torch.device("cuda:0"),
                          s1=0.8, s2=1.2, ratios=None, prune_n=0, prune_m=0,
@@ -972,15 +957,15 @@ def ww_sparsity_llama_7b(args, model, device=torch.device("cuda:0"),
     print("Combined layerwise pruning ratios:", combined_ratios)
     return combined_ratios
 
-def ww_sparsity_test_uni(args, model, device=torch.device("cuda:0"),
+def ww_sparsity_test_3b(args, model, device=torch.device("cuda:0"),
                          s1=0.8, s2=1.2, ratios=None, prune_n=0, prune_m=0,
                          weight_esd=0.5, eps=1e-8):
-    a = []
-    for i in range(32 * 7):
-        a.append(args.sparsity_ratio)
-    a = torch.tensor(a, dtype=torch.float32)
-    print(a)
-    return  a.cpu().numpy().tolist()
+    a = [0.6010719537734985, 0.7836087942123413, 0.664392352104187, 0.5418923497200012, 0.5437350869178772, 0.6336459517478943, 0.6947802901268005, 0.7654532194137573, 0.8021514415740967, 0.8008740544319153, 0.8128385543823242, 0.8010240197181702, 0.7966197729110718, 0.7713892459869385, 0.7702241539955139, 0.7490575313568115, 0.721372663974762, 0.7437793016433716, 0.7191744446754456, 0.6823052763938904, 0.6935591697692871, 0.6764902472496033, 0.6683767437934875, 0.6596450209617615, 0.6463388204574585, 0.6539862155914307, 0.6566191911697388, 0.6523621678352356, 0.6531320810317993, 0.6635245680809021, 0.6741456389427185, 0.7024263143539429]
+    c = []
+    for i in a:
+        for j in range(7):
+            c.append(i)
+    return c
 #########################################################################################################################
 
 def prune_magnitude(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, prune_m=0, ratios=None):
@@ -1214,7 +1199,7 @@ def prune_magnitude_ww2(args, model, tokenizer, device=torch.device("cuda:0"), p
     s1 = 1.0 - args.epsilon
     s2 = 1.0 + args.epsilon
     
-    all_layer_ratio = ww_sparsity_llama_13b(args, model, device, s1, s2)
+    all_layer_ratio = ww_sparsity_test_3b(args, model, device, s1, s2)
     # magnitude pruning
     prune_magnitude(args, model, tokenizer, device, ratios=all_layer_ratio)
     
@@ -1231,7 +1216,7 @@ def prune_wanda_ww2(args, model, tokenizer, device=torch.device("cuda:0"), prune
     s1 = 1.0 - args.epsilon
     s2 = 1.0 + args.epsilon
 
-    all_layer_ratio = ww_sparsity_llama_13b(args, model, device, s1, s2)
+    all_layer_ratio = ww_sparsity_test_3b(args, model, device, s1, s2)
     # wanda pruning
     prune_wanda(args, model, tokenizer, device, ratios=all_layer_ratio)   
     
@@ -1247,6 +1232,6 @@ def prune_sparsegpt_ww2(args, model, tokenizer, device=torch.device("cuda:0"), p
     s1 = 1.0 - args.epsilon
     s2 = 1.0 + args.epsilon
 
-    all_layer_ratio = ww_sparsity_llama_13b(args, model, device, s1, s2)
+    all_layer_ratio = ww_sparsity_test_3b(args, model, device, s1, s2)
     # sparsegpt pruning
     prune_sparsegpt(args, model, tokenizer, device, ratios=all_layer_ratio)
