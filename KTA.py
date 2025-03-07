@@ -5,28 +5,24 @@ from transformers import LlamaModel, AutoTokenizer
 
 
 
-def compute_KTA(H, T):
-    """ 计算 Kernel Target Alignment (KTA) """
-
-    H = H.astype(np.float64)  # **使用 float64 提高精度**
+def compute_KTA_approx(H, T, sample_size=1000):
+    # H: (seq_len, hidden_dim)
+    # T: (seq_len, seq_len) 目标矩阵，需要相应采样
+    num_tokens = H.shape[0]
+    sample_idx = np.random.choice(num_tokens, size=min(sample_size, num_tokens), replace=False)
+    H_sample = H[sample_idx, :]
+    T_sample = T[np.ix_(sample_idx, sample_idx)]
     
-    # **归一化 H，防止溢出**
-    H_norm = np.linalg.norm(H, axis=1, keepdims=True) + 1e-6  # **确保不为 0**
-    H = H / H_norm
-    H = np.clip(H, -1, 1)  # **限制数值范围，防止极端值影响计算**
+    H_sample_norm = np.linalg.norm(H_sample, axis=1, keepdims=True) + 1e-6
+    H_sample = H_sample / H_sample_norm
+    H_sample = np.clip(H_sample, -1.0, 1.0)  # 归一化和剪裁
 
-    # **log-scaling 防止爆炸**
-    H = np.sign(H) * np.log1p(np.abs(H))  
+    K_sample = H_sample @ H_sample.T
+    T_sample = T_sample @ T_sample.T
 
-    # **计算核矩阵 K 和目标矩阵 T**
-    K = np.matmul(H, H.T)  
-    T = np.matmul(T, T.T)  
-
-    # **计算 Frobenius 范数**
-    K_norm = np.sqrt(np.sum(K**2)) + 1e-6
-    T_norm = np.sqrt(np.sum(T**2)) + 1e-6
-
-    inner_product = np.sum(K * T)
+    K_norm = np.sqrt(np.sum(K_sample**2)) + 1e-6
+    T_norm = np.sqrt(np.sum(T_sample**2)) + 1e-6
+    inner_product = np.sum(K_sample * T_sample)
     return inner_product / (K_norm * T_norm)
 
 
@@ -74,7 +70,7 @@ for _ in range(num_runs):
             continue
         
         K = np.matmul(H, H.T)  
-        kta_value = compute_KTA(K, labels)
+        kta_value = compute_KTA_approx(K, labels)
         
         # **忽略 `NaN` 结果**
         if not np.isnan(kta_value):
