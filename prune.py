@@ -191,8 +191,79 @@ def ww_sparsity(args, model, device=torch.device("cuda:0"), s1=0.8, s2=1.2, rati
     #print(layerwise_pruning_ratios, " new ratio")
     return layerwise_pruning_ratios
 
+def ww_sparsity_llama_32_3b(args, model, device=torch.device("cuda:0"),
+                         s1=0.8, s2=1.2, ratios=None, prune_n=0, prune_m=0,
+                         weight_esd=0.85, eps=1e-8):
+    if "opt" in args.model:
+        blocks = model.model.decoder.layers    
+    else:
+        blocks = model.model.layers
+
+    # 得到待剪枝层字典，假设 find_layers 返回的顺序与 transformer 层顺序一致，
+    # 每个 transformer 层内有7个子层
+    layers = [find_layers(blocks)]
+    prunables = []
+    for layer in layers:
+        for name in layer:
+            prunables.append(layer[name].weight.numel())
+    layer_num_in_block = int(len(prunables) / len(blocks))
+    
+    # 加载ESD指标
+    metrics = np.load(f"{args.ww_metric_cache}/{args.ww_metric}.npy")
+
+    if args.mapping_type == 'block_wise':
+        block_metrics = [np.mean(metrics[i:i+layer_num_in_block]) 
+                         for i in range(0, len(metrics), layer_num_in_block)]
+        metrics = [i for i in block_metrics for j in range(layer_num_in_block)]
+    print("ESD metric values after block_wise processing:", metrics)
+
+    scores = torch.tensor(metrics)
+    prunables = torch.tensor(prunables)
+
+    # linear mapping
+    max = torch.max(scores)
+    min = torch.min(scores)
+    
+    layerwise_pruning_ratios = (((scores - min) / (max - min)) * (s2 - s1) + s1)
+    scaler = torch.sum(prunables) * args.sparsity_ratio / (torch.sum(prunables * layerwise_pruning_ratios))  
+    layerwise_pruning_ratios = layerwise_pruning_ratios * scaler
+    layerwise_pruning_ratios = layerwise_pruning_ratios.cpu().numpy().tolist()
+    print("esd:  ", layerwise_pruning_ratios)
+    segments = {
+        0: [0],
+        1: [1],
+        2: [2],
+        3: [3, 4, 5, 6],
+        4: [7, 8, 9, 10, 11, 12],
+        5: [13],
+        6: [14],
+        7: [15, 16],
+        8: [17, 18],
+        9: [19, 20, 21, 22],
+        10: [23, 24],
+        11: [25],
+        12: [26],
+        13: [27]
+    }
 
 
+
+    res = []
+    cur_pointer = 0
+    for seg, l in segments.items():
+        lens = len(l)
+        cur = 0
+        
+        for i in range(lens):
+            cur += layerwise_pruning_ratios[cur_pointer * 7]
+            cur_pointer += 1
+        cur /= lens
+        for i in range(lens):
+            for j in range(7):
+                res.append(cur)
+    print(res)
+
+    return res
 
     
 def ww_sparsity_llama_13b(args, model, device=torch.device("cuda:0"),
@@ -237,19 +308,26 @@ def ww_sparsity_llama_13b(args, model, device=torch.device("cuda:0"),
     segments = {
         0: [0],
         1: [1],
-        2: [2, 3, 4, 5],
-        3: [6, 7, 8, 9, 10, 11, 12, 13],
-        4: [14, 15, 16, 17],
-        5: [18, 19, 20, 21, 22, 23, 24, 25, 26],
-        6: [27, 28, 29, 30, 31, 32],
-        7: [33],
-        8: [34],
-        9: [35],
-        10: [36],
-        11: [37],
-        12: [38],
-        13: [39]
+        2: [2, 3],
+        3: [4, 5],
+        4: [6, 7, 8, 9],
+        5: [10, 11],
+        6: [12, 13],
+        7: [14],
+        8: [15, 16, 17, 18],
+        9: [19],
+        10: [20, 21, 22, 23, 24, 25, 26],
+        11: [27, 28, 29],
+        12: [30, 31, 32],
+        13: [33],
+        14: [34],
+        15: [35],
+        16: [36],
+        17: [37],
+        18: [38],
+        19: [39]
     }
+
 
 
     res = []
