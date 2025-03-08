@@ -69,7 +69,7 @@ cka_importance = 1 - cka_importance
 cka_importance = (cka_importance - cka_importance.min()) / (cka_importance.max() - cka_importance.min())
 
 # **最终剪枝比例（让高重要性层剪枝更少）**
-adjusted_pruning_ratios = esd_pruning_ratios * (1 - 0.5 * cka_importance)
+adjusted_pruning_ratios = esd_pruning_ratios * (1 - 0.2 * cka_importance)
 
 # **🚀 归一化，保持剪枝比例均值不变**
 original_mean = esd_pruning_ratios.mean()
