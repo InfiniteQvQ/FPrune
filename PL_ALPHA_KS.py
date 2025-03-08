@@ -1,27 +1,36 @@
 import torch
 import numpy as np
-import matplotlib.pyplot as plt
-from scipy.stats import gaussian_kde
+from scipy.stats import gaussian_kde, wasserstein_distance
+from sklearn.feature_selection import mutual_info_regression
 from transformers import LlamaModel, AutoTokenizer
 
 def compute_pdf(activations, num_points=100):
-    """计算 PDF（概率密度函数）"""
     kde = gaussian_kde(activations)
     x_range = np.linspace(min(activations), max(activations), num_points)
     pdf_values = kde(x_range)
     return x_range, pdf_values
 
-def compute_ccdf(activations):
-    """计算 CCDF（补充累积分布函数）"""
-    sorted_activations = np.sort(activations)
-    ccdf_values = 1 - np.arange(1, len(sorted_activations) + 1) / len(sorted_activations)
-    return sorted_activations, ccdf_values
+def compute_mutual_information(X, Y):
+    X = X.reshape(X.shape[0], -1)
+    Y = Y.reshape(Y.shape[0], -1)
+    mi_values = []
+    for i in range(X.shape[1]):
+        mi = mutual_info_regression(X, Y[:, i])
+        mi_values.append(np.mean(mi))
+    return np.mean(mi_values)
 
-def compute_layer_importance(x_range, pdf_values):
-    """计算层的重要性 (Layer Importance)"""
-    return np.trapz(np.abs(x_range) * pdf_values, x_range)  # 数值积分计算重要性
+def compute_spectral_entropy(H):
+    H = H - np.mean(H, axis=0)
+    C = np.cov(H, rowvar=False)
+    eigvals = np.linalg.eigvalsh(C)
+    eigvals = eigvals[eigvals > 1e-6]
+    return -np.sum(eigvals * np.log(eigvals))
 
-# **加载 LLaMA 7B 模型**
+def compute_wasserstein_distance(H1, H2):
+    H1 = H1.flatten()
+    H2 = H2.flatten()
+    return wasserstein_distance(H1, H2)
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model_name = "pinkmanlove/llama-7b-hf"
 
@@ -34,43 +43,44 @@ model = LlamaModel.from_pretrained(
     device_map="auto"
 )
 
-# **处理输入**
-text = ["LLaMA 7B Activation Distribution Analysis."]
+text = ["LLaMA 7B Analysis"]
 inputs = tokenizer(text, return_tensors="pt")
 inputs.pop("token_type_ids", None)
 inputs = {key: val.to(device) for key, val in inputs.items()}
 
-# **获取隐藏状态**
 with torch.no_grad():
     outputs = model(**inputs)
 
 hidden_states = outputs.hidden_states  # (num_layers, batch, seq_len, hidden_dim)
 
-layer_importance_scores = {}  # 存储层重要性得分
-layer_pdf_data = {}  # 存储 PDF 数据
-layer_ccdf_data = {}  # 存储 CCDF 数据
+importance_scores = {}
 
-# **遍历所有层**
-for layer_idx in range(model.config.num_hidden_layers):
-    activations = hidden_states[layer_idx][0].cpu().numpy().flatten()
+for layer_idx in range(model.config.num_hidden_layers - 1):
+    H = hidden_states[layer_idx][0].cpu().numpy()
+    H_next = hidden_states[layer_idx + 1][0].cpu().numpy()
 
-    # **计算 PDF**
+    # 计算 PDF/CCDF
+    activations = H.flatten()
     x_range, pdf_values = compute_pdf(activations)
 
-    # **计算 CCDF**
-    sorted_activations, ccdf_values = compute_ccdf(activations)
+    # 计算 互信息
+    mi = compute_mutual_information(H, H_next)
 
-    # **计算层重要性**
-    layer_importance = compute_layer_importance(x_range, pdf_values)
-    layer_importance_scores[layer_idx] = layer_importance
-    layer_pdf_data[layer_idx] = (x_range, pdf_values)
-    layer_ccdf_data[layer_idx] = (sorted_activations, ccdf_values)
+    # 计算特征值熵
+    entropy = compute_spectral_entropy(H)
 
-    print(f"Layer {layer_idx} Importance: {layer_importance:.4f}")
+    # 计算 Wasserstein 距离
+    wd = compute_wasserstein_distance(H, H_next)
 
-# **排序层重要性**
-sorted_importance = sorted(layer_importance_scores.items(), key=lambda x: x[1], reverse=True)
-print("\nFinal Layer Importance Ranking:")
-for layer, score in sorted_importance:
-    print(f"Layer {layer}: {score:.4f}")
+    importance_scores[layer_idx] = {
+        "Layer Importance": np.trapz(np.abs(x_range) * pdf_values, x_range),
+        "Mutual Information": mi,
+        "Spectral Entropy": entropy,
+        "Wasserstein Distance": wd
+    }
 
+# 输出层的重要性
+for layer, metrics in importance_scores.items():
+    print(f"Layer {layer}:")
+    for key, value in metrics.items():
+        print(f"  {key}: {value:.4f}")
