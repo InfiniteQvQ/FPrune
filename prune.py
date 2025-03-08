@@ -908,7 +908,7 @@ def ww_sparsity_llama_7b(args, model, device=torch.device("cuda:0"),
                          for i in range(0, len(metrics), layer_num_in_block)]
         metrics = [i for i in block_metrics for j in range(layer_num_in_block)]
     print("ESD metric values after block_wise processing:", metrics)
-            
+        
     scores = torch.tensor(metrics, dtype=torch.float32)
     prunables_tensor = torch.tensor(prunables, dtype=torch.float32)
     max_score = torch.max(scores)
@@ -919,7 +919,7 @@ def ww_sparsity_llama_7b(args, model, device=torch.device("cuda:0"),
     layerwise_pruning_ratios_esd = layerwise_pruning_ratios_esd * scaler
     layerwise_pruning_ratios_esd = layerwise_pruning_ratios_esd.cpu().numpy().tolist()
     print("ESD-based ratios:", layerwise_pruning_ratios_esd)
-
+    
     importance = np.array([0.3262, 0.2539,0.1846, 0.1846,0.0899,0.0899,0.0899,0.0899,0.0899,0.0899,0.0899,0.0481,0.0481,
                        0.0389,0.0389,0.0389,0.0317,0.0268,0.0268,0.0268,0.0227,0.0191,0.0191,0.0191,0.0191,
                        0.0191,0.0191,0.0191,0.0164,0.0157,0.0154,0.0086])
@@ -960,11 +960,8 @@ def ww_sparsity_llama_7b(args, model, device=torch.device("cuda:0"),
 def ww_sparsity_test_3b(args, model, device=torch.device("cuda:0"),
                          s1=0.8, s2=1.2, ratios=None, prune_n=0, prune_m=0,
                          weight_esd=0.8, eps=1e-8):
-    a = [0.5331447720527649, 0.7997171878814697, 0.7751526832580566, 0.6769716143608093, 0.649221658706665, 0.6286274194717407, 0.6404637694358826, 0.6466345191001892, 0.6497976183891296, 0.6587591767311096, 0.6698668003082275, 0.6724376678466797, 0.6732290387153625, 0.6773343682289124, 0.6751571893692017, 0.6687415242195129, 0.6550754904747009, 0.6783114671707153, 0.6869003772735596, 0.6943190097808838, 0.7039706707000732, 0.7158758044242859, 0.7300950288772583, 0.7392279505729675, 0.7549982070922852, 0.7620316743850708, 0.7647109627723694, 0.764947235584259, 0.7676514983177185, 0.7667256593704224, 0.7661045789718628, 0.7537970542907715]
     c = []
-    for i in a:
-        for j in range(7):
-            c.append(i)
+    
     if "opt" in args.model:
         blocks = model.model.decoder.layers    
     else:
@@ -999,15 +996,10 @@ def ww_sparsity_test_3b(args, model, device=torch.device("cuda:0"),
     layerwise_pruning_ratios_esd = layerwise_pruning_ratios_esd.cpu().numpy().tolist()
     print("ESD-based ratios:", layerwise_pruning_ratios_esd)
 
-    combined_ratios = []
-    for r_esd, r_imp in zip(layerwise_pruning_ratios_esd, c):
-        combined = weight_esd * r_esd + (1 - weight_esd) * r_imp
-        combined = min(combined, 1.0)
-        combined_ratios.append(combined)
-    
-    print("Combined layerwise pruning ratios:", combined_ratios)
-    
-    return combined_ratios
+    for i in range(32):
+        c.append(layerwise_pruning_ratios_esd[i*7])
+    print(c)
+    return layerwise_pruning_ratios_esd
 #########################################################################################################################
 
 def prune_magnitude(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, prune_m=0, ratios=None):
