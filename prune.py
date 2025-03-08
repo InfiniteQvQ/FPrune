@@ -965,7 +965,49 @@ def ww_sparsity_test_3b(args, model, device=torch.device("cuda:0"),
     for i in a:
         for j in range(7):
             c.append(i)
-    return c
+    if "opt" in args.model:
+        blocks = model.model.decoder.layers    
+    else:
+        blocks = model.model.layers
+
+    # 得到待剪枝层字典，假设 find_layers 返回的顺序与 transformer 层顺序一致，
+    # 每个 transformer 层内有7个子层
+    layers = [find_layers(blocks)]
+    prunables = []
+    for layer in layers:
+        for name in layer:
+            prunables.append(layer[name].weight.numel())
+    layer_num_in_block = int(len(prunables) / len(blocks))
+    
+    # 加载ESD指标
+    metrics = np.load(f"{args.ww_metric_cache}/{args.ww_metric}.npy")
+    print("ESD raw metrics:", metrics)
+    if args.mapping_type == 'block_wise':
+        block_metrics = [np.mean(metrics[i:i+layer_num_in_block]) 
+                         for i in range(0, len(metrics), layer_num_in_block)]
+        metrics = [i for i in block_metrics for j in range(layer_num_in_block)]
+    print("ESD metric values after block_wise processing:", metrics)
+            
+    scores = torch.tensor(metrics, dtype=torch.float32)
+    prunables_tensor = torch.tensor(prunables, dtype=torch.float32)
+    max_score = torch.max(scores)
+    min_score = torch.min(scores)
+    # 线性映射到 [s1, s2]
+    layerwise_pruning_ratios_esd = (((scores - min_score) / (max_score - min_score)) * (s2 - s1) + s1)
+    scaler = torch.sum(prunables_tensor) * args.sparsity_ratio / (torch.sum(prunables_tensor * layerwise_pruning_ratios_esd))
+    layerwise_pruning_ratios_esd = layerwise_pruning_ratios_esd * scaler
+    layerwise_pruning_ratios_esd = layerwise_pruning_ratios_esd.cpu().numpy().tolist()
+    print("ESD-based ratios:", layerwise_pruning_ratios_esd)
+
+    combined_ratios = []
+    for r_esd, r_imp in zip(layerwise_pruning_ratios_esd, c):
+        combined = weight_esd * r_esd + (1 - weight_esd) * r_imp
+        combined = min(combined, 1.0)
+        combined_ratios.append(combined)
+    
+    print("Combined layerwise pruning ratios:", combined_ratios)
+    
+    return combined_ratios
 #########################################################################################################################
 
 def prune_magnitude(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, prune_m=0, ratios=None):
