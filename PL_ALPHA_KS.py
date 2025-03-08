@@ -86,7 +86,7 @@ esd_pruning_ratios = np.array([
 ])
 
 # ✅ 结合 CKA 影响 ESD
-alpha = 0.5  # CKA 影响力（可以调整）
+alpha = 0.1  # CKA 影响力（可以调整）
 adjusted_pruning_ratios = esd_pruning_ratios * (1 - alpha * adjusted_cka)
 
 # ✅ 重新归一化，使剪枝总和不变
