@@ -34,20 +34,20 @@ def wasserstein_distance_torch(H1, H2, eps=1e-3, max_iter=50, chunk_size=512):
     """
     计算 Sinkhorn-Wasserstein 距离，逐块计算 Cost 矩阵，减少显存占用
     """
-    H1 = H1.to(torch.float16)  # **降低精度减少显存占用**
-    H2 = H2.to(torch.float16)  
+    H1 = H1.to(torch.float32)  # **转换为 float32，避免 torch.cdist 报错**
+    H2 = H2.to(torch.float32)  
 
     n, d = H1.shape
     m, _ = H2.shape
 
     # **初始化 cost_matrix**
-    cost_matrix = torch.zeros(n, m, dtype=torch.float16, device=H1.device)
+    cost_matrix = torch.zeros(n, m, dtype=torch.float32, device=H1.device)
 
     # 🔥 **分块计算 Cost 矩阵**
     for i in range(0, n, chunk_size):
         for j in range(0, m, chunk_size):
-            sub_H1 = H1[i : i + chunk_size]
-            sub_H2 = H2[j : j + chunk_size]
+            sub_H1 = H1[i : i + chunk_size].to(torch.float32)
+            sub_H2 = H2[j : j + chunk_size].to(torch.float32)
             cost_matrix[i : i + chunk_size, j : j + chunk_size] = torch.cdist(sub_H1, sub_H2, p=2).pow(2)
 
     torch.cuda.empty_cache()  # **释放显存**
@@ -65,6 +65,7 @@ def wasserstein_distance_torch(H1, H2, eps=1e-3, max_iter=50, chunk_size=512):
         v = -torch.logsumexp((-cost_matrix + u[:, None]) / eps, dim=0) + torch.log(b)
 
     return (u[:, None] + v[None, :] - cost_matrix).exp().sum()
+
 
 # **🔥 计算 Wasserstein**
 layerwise_wasserstein = []
