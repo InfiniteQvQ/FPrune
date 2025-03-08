@@ -1,14 +1,33 @@
 import torch
 import torch.nn.functional as F
 import numpy as np
+from transformers import LlamaModel, AutoTokenizer
 
-# **已有的 ESD 剪枝比例**
-esd_pruning_ratios = torch.tensor([
-    0.5704, 0.6176, 0.6315, 0.6307, 0.6528, 0.6482, 0.6300, 0.5921,
-    0.5973, 0.5680, 0.5870, 0.5893, 0.5989, 0.6108, 0.6187, 0.6681,
-    0.6586, 0.7156, 0.7905, 0.7437, 0.7946, 0.8248, 0.7700, 0.7629,
-    0.8121, 0.8520, 0.8312, 0.8414, 0.7869, 0.8296, 0.8414, 0.7317
-], device="cuda")
+# **加载 Llama 7B**
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model_name = "pinkmanlove/llama-7b-hf"
+
+tokenizer = AutoTokenizer.from_pretrained("HuggingFaceM4/llama-7b-tokenizer")
+model = LlamaModel.from_pretrained(
+    model_name,
+    cache_dir="/root/autodl-tmp/llm_weights",
+    output_hidden_states=True,
+    torch_dtype=torch.float16,
+    device_map="auto"
+)
+
+# **输入处理**
+text = ["LLaMA 7B Kernel Target Alignment computation."]
+inputs = tokenizer(text, return_tensors="pt")
+inputs.pop("token_type_ids", None)
+inputs = {key: val.to(device) for key, val in inputs.items()}
+
+# **前向传播**
+with torch.no_grad():
+    outputs = model(**inputs)
+
+hidden_states = outputs.hidden_states  # tuple of (num_layers, batch, seq_len, hidden_dim)
+num_layers = len(hidden_states) - 1  # 不包括 embedding 层
 
 # **计算 Wasserstein 距离 (Sinkhorn-Knopp 迭代)**
 def wasserstein_distance_torch(H1, H2, eps=1e-3, max_iter=50):
@@ -55,34 +74,35 @@ def mutual_information_torch(H1, H2, num_bins=256):
     I_xy = (P_xy_nonzero * torch.log(P_xy_nonzero / (P_x_nonzero * P_y_nonzero))).sum()
     return I_xy
 
-# **加载 Llama 7B**
-device = "cuda"
-model = torch.load("/root/autodl-tmp/llm_weights/model.pth", map_location=device)
-model.eval()
-
 # **计算 Wasserstein 和 互信息**
 layerwise_wasserstein = []
 layerwise_mutual_info = []
-hidden_states = torch.load("/root/autodl-tmp/hidden_states.pth", map_location=device)
-num_layers = len(hidden_states) - 1
 
-for layer_idx in range(num_layers):
-    H = hidden_states[layer_idx]
-    H_next = hidden_states[layer_idx + 1]
+for layer_idx in range(num_layers - 1):
+    H = hidden_states[layer_idx][0].to(torch.float32)  # 取 batch=0, 转为 float32 避免 underflow
+    H_next = hidden_states[layer_idx + 1][0].to(torch.float32)
 
     # **使用 GPU 计算 Wasserstein 距离**
     wd = wasserstein_distance_torch(H, H_next)
-    layerwise_wasserstein.append(wd)
+    layerwise_wasserstein.append(wd.item())
 
     # **使用 GPU 计算互信息**
     mi = mutual_information_torch(H, H_next)
-    layerwise_mutual_info.append(mi)
+    layerwise_mutual_info.append(mi.item())
 
 # **归一化 Wasserstein & 互信息**
 wasserstein_scores = torch.tensor(layerwise_wasserstein, device="cuda")
 mutual_info_scores = torch.tensor(layerwise_mutual_info, device="cuda")
 wasserstein_scores = (wasserstein_scores - wasserstein_scores.min()) / (wasserstein_scores.max() - wasserstein_scores.min())
 mutual_info_scores = (mutual_info_scores - mutual_info_scores.min()) / (mutual_info_scores.max() - mutual_info_scores.min())
+
+# **已有的 ESD 剪枝比例**
+esd_pruning_ratios = torch.tensor([
+    0.5704, 0.6176, 0.6315, 0.6307, 0.6528, 0.6482, 0.6300, 0.5921,
+    0.5973, 0.5680, 0.5870, 0.5893, 0.5989, 0.6108, 0.6187, 0.6681,
+    0.6586, 0.7156, 0.7905, 0.7437, 0.7946, 0.8248, 0.7700, 0.7629,
+    0.8121, 0.8520, 0.8312, 0.8414, 0.7869, 0.8296, 0.8414, 0.7317
+], device="cuda")
 
 # **融合 ESD 重要性 和 层间信息**
 alpha = 0.5  # Wasserstein 影响权重
