@@ -12,7 +12,7 @@ def compute_KTA_approx(H, sample_size=512):
     # 采样
     sample_idx = np.random.choice(num_tokens, size=sample_size, replace=False)
     H_sample = H[sample_idx, :]
-
+    H_sample = H_sample.astype(np.float32)
     # SVD 降维
     U, S, Vt = np.linalg.svd(H_sample, full_matrices=False)
     rank = min(sample_size, H_sample.shape[1])
