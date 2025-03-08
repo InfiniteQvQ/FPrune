@@ -2,7 +2,7 @@ import torch
 import numpy as np
 from transformers import LlamaModel, AutoTokenizer
 
-# 🚀 计算 CKA
+# 🚀 计算 CKA 相似性
 def cka_similarity(X, Y):
     X, Y = X.to(torch.float32), Y.to(torch.float32)  
     K_X = X @ X.transpose(-1, -2)  
@@ -62,17 +62,18 @@ esd_pruning_ratios = torch.tensor([
 if esd_pruning_ratios.shape[0] != num_layers:
     esd_pruning_ratios = esd_pruning_ratios[:num_layers]  # **确保 ESD 也是 32 层**
 
-# **🚀 结合 CKA 重新调整剪枝比例**
-min_ratio, max_ratio = 0.3, 0.9  
+# **🚀 反转 CKA，确保高 CKA 重要性低**
+cka_importance = 1 - cka_importance  
 
-# 归一化 CKA 重要性
+# 🚀 归一化 CKA 到 0~1
 cka_importance = (cka_importance - cka_importance.min()) / (cka_importance.max() - cka_importance.min())
 
-# **最终剪枝比例**
-adjusted_pruning_ratios = min_ratio + (max_ratio - min_ratio) * (1 - cka_importance) * esd_pruning_ratios
+# **最终剪枝比例（让高重要性层剪枝更少）**
+adjusted_pruning_ratios = esd_pruning_ratios * (1 - 0.5 * cka_importance)
 
-# **🚀 归一化，保持剪枝比例不变**
-scaler = esd_pruning_ratios.sum() / adjusted_pruning_ratios.sum()
-final_pruning_ratios = adjusted_pruning_ratios * scaler
+# **🚀 归一化，保持剪枝比例均值不变**
+original_mean = esd_pruning_ratios.mean()
+adjusted_mean = adjusted_pruning_ratios.mean()
+final_pruning_ratios = adjusted_pruning_ratios * (original_mean / adjusted_mean)
 
 print("Final Adjusted Pruning Ratios:", final_pruning_ratios.cpu().numpy())
