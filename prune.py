@@ -960,8 +960,8 @@ def ww_sparsity_llama_7b(args, model, device=torch.device("cuda:0"),
 def ww_sparsity_test_3b(args, model, device=torch.device("cuda:0"),
                          s1=0.8, s2=1.2, ratios=None, prune_n=0, prune_m=0,
                          weight_esd=0.8, eps=1e-8):
-    c = []
-    
+    c = [0.4007396, 0.46776718, 0.6634967, 0.6626449, 0.6859255, 0.68112713, 0.6620162, 0.62221193, 0.627709, 0.5969358, 0.616923, 0.61939996, 0.6295352, 0.642095, 0.6504617, 0.7024144, 0.6926791, 0.752882, 0.8319237, 0.78297323, 0.8370851, 0.8694673, 0.81212485, 0.8052172, 0.85755527, 0.8999915, 0.87820315, 0.88922, 0.8317499, 0.87693447, 0.4447039, 0.4042868]
+    return c
     if "opt" in args.model:
         blocks = model.model.decoder.layers    
     else:
