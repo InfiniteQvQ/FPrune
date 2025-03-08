@@ -30,12 +30,23 @@ hidden_states = outputs.hidden_states  # tuple of (num_layers, batch, seq_len, h
 num_layers = len(hidden_states) - 1  # 不包括 embedding 层
 
 # **🔥 逐块计算 Wasserstein 距离，防止显存溢出**
+import torch
+
 def wasserstein_distance_torch(H1, H2, eps=1e-3, max_iter=50, chunk_size=512):
     """
-    计算 Sinkhorn-Wasserstein 距离，逐块计算 Cost 矩阵，减少显存占用
+    计算 Sinkhorn-Wasserstein 距离，避免 NaN 和数值溢出问题。
     """
-    H1 = H1.to(torch.float32)  # **转换为 float32，避免 torch.cdist 报错**
-    H2 = H2.to(torch.float32)  
+    H1 = H1.to(torch.float32)  # **转换为 float32，防止 torch.cdist 报错**
+    H2 = H2.to(torch.float32)
+
+    # ✅ **检查 NaN 或 Inf**
+    if torch.isnan(H1).any() or torch.isinf(H1).any():
+        print("⚠️ Warning: NaN or Inf detected in H1")
+        return float('nan')
+
+    if torch.isnan(H2).any() or torch.isinf(H2).any():
+        print("⚠️ Warning: NaN or Inf detected in H2")
+        return float('nan')
 
     n, d = H1.shape
     m, _ = H2.shape
@@ -43,15 +54,20 @@ def wasserstein_distance_torch(H1, H2, eps=1e-3, max_iter=50, chunk_size=512):
     # **初始化 cost_matrix**
     cost_matrix = torch.zeros(n, m, dtype=torch.float32, device=H1.device)
 
-    # 🔥 **分块计算 Cost 矩阵**
+    # 🔥 **逐块计算 Cost 矩阵，减少显存占用**
     for i in range(0, n, chunk_size):
         for j in range(0, m, chunk_size):
-            sub_H1 = H1[i : i + chunk_size].to(torch.float32)
-            sub_H2 = H2[j : j + chunk_size].to(torch.float32)
-            cost_matrix[i : i + chunk_size, j : j + chunk_size] = torch.cdist(sub_H1, sub_H2, p=2).pow(2)
+            sub_H1 = H1[i : i + chunk_size]
+            sub_H2 = H2[j : j + chunk_size]
+
+            dist_matrix = torch.cdist(sub_H1, sub_H2, p=2).pow(2)
+            cost_matrix[i : i + chunk_size, j : j + chunk_size] = dist_matrix
 
     torch.cuda.empty_cache()  # **释放显存**
-    
+
+    # **🔥 归一化 Cost Matrix，避免数值过大**
+    cost_matrix /= cost_matrix.max() + 1e-6
+
     # **初始化分布**
     a = torch.ones(n, device=H1.device) / n
     b = torch.ones(m, device=H2.device) / m
@@ -61,10 +77,23 @@ def wasserstein_distance_torch(H1, H2, eps=1e-3, max_iter=50, chunk_size=512):
 
     # **🔥 Sinkhorn-Knopp 迭代**
     for _ in range(max_iter):
+        u_prev = u.clone()
+        v_prev = v.clone()
+
         u = -torch.logsumexp((-cost_matrix + v[None, :]) / eps, dim=1) + torch.log(a)
         v = -torch.logsumexp((-cost_matrix + u[:, None]) / eps, dim=0) + torch.log(b)
 
+        # ✅ **数值稳定性检查**
+        if torch.isnan(u).any() or torch.isnan(v).any():
+            print("⚠️ Warning: NaN detected in Sinkhorn iterations")
+            return float('nan')
+
+        # ✅ **提前收敛检查**
+        if torch.norm(u - u_prev) < 1e-6 and torch.norm(v - v_prev) < 1e-6:
+            break
+
     return (u[:, None] + v[None, :] - cost_matrix).exp().sum()
+
 
 
 # **🔥 计算 Wasserstein**
