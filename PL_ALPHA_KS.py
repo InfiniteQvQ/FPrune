@@ -1,9 +1,20 @@
 import torch
-import torch.nn.functional as F
 import numpy as np
 from transformers import LlamaModel, AutoTokenizer
 
-# **🔥 确保模型用多个 GPU**
+# **🚀 计算 CKA 相似度**
+def cka_similarity(X, Y):
+    """ 计算 CKA 相似度，衡量 Transformer 层之间的相似性。 """
+    X, Y = X.to(torch.float32), Y.to(torch.float32)  # 计算稳定性
+    K_X = X @ X.transpose(-1, -2)  # Gram 矩阵
+    K_Y = Y @ Y.transpose(-1, -2)
+
+    num = (K_X * K_Y).sum()
+    denom = torch.sqrt((K_X * K_X).sum()) * torch.sqrt((K_Y * K_Y).sum())
+
+    return num / (denom + 1e-6)  # 避免除 0
+
+# **🚀 加载 LLaMA 7B**
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model_name = "pinkmanlove/llama-7b-hf"
 
@@ -12,105 +23,54 @@ model = LlamaModel.from_pretrained(
     model_name,
     cache_dir="/root/autodl-tmp/llm_weights",
     output_hidden_states=True,
-    torch_dtype=torch.float16,  
+    torch_dtype=torch.float16,
     device_map="auto"  # **自动分配多个 GPU**
 )
 
-# **输入处理**
+# **🚀 输入文本**
 text = ["LLaMA 7B Kernel Target Alignment computation."]
 inputs = tokenizer(text, return_tensors="pt")
 inputs.pop("token_type_ids", None)
 inputs = {key: val.to(device) for key, val in inputs.items()}
 
-# **前向传播**
+# **🚀 获取 32 层隐藏状态**
 with torch.no_grad():
     outputs = model(**inputs)
 
-hidden_states = outputs.hidden_states  # tuple of (num_layers, batch, seq_len, hidden_dim)
-num_layers = len(hidden_states) - 1  # 不包括 embedding 层
+hidden_states = outputs.hidden_states  # (num_layers, batch, seq_len, hidden_dim)
+num_layers = len(hidden_states)
+seq_len = hidden_states[0].shape[1]
 
-# **🔥 逐块计算 Wasserstein 距离，防止显存溢出**
-import torch
+# **🚀 计算 32 层的 CKA 相似度**
+cka_matrix = torch.zeros(num_layers, num_layers).to(device)
 
-def wasserstein_distance_torch(H1, H2, eps=1e-3, max_iter=50, chunk_size=512):
-    """
-    计算 Sinkhorn-Wasserstein 距离，避免 NaN 和数值溢出问题。
-    """
-    H1 = H1.to(torch.float32)  # **转换为 float32，防止 torch.cdist 报错**
-    H2 = H2.to(torch.float32)
+for i in range(num_layers):
+    for j in range(i, num_layers):  # 只计算上三角
+        cka_matrix[i, j] = cka_similarity(hidden_states[i][0], hidden_states[j][0])
+        cka_matrix[j, i] = cka_matrix[i, j]  # 对称矩阵
 
-    # ✅ **检查 NaN 或 Inf**
-    if torch.isnan(H1).any() or torch.isinf(H1).any():
-        print("⚠️ Warning: NaN or Inf detected in H1")
-        return float('nan')
+# **🚀 计算每层 CKA 重要性（与其他层的平均相似度）**
+cka_importance = cka_matrix.mean(dim=1)
 
-    if torch.isnan(H2).any() or torch.isinf(H2).any():
-        print("⚠️ Warning: NaN or Inf detected in H2")
-        return float('nan')
+# **🚀 ESD 剪枝比例**
+esd_pruning_ratios = torch.tensor([
+    0.5704, 0.6176, 0.6315, 0.6307, 0.6528, 0.6482, 0.6300, 0.5921, 0.5973, 0.5680,
+    0.5870, 0.5893, 0.5989, 0.6108, 0.6187, 0.6681, 0.6586, 0.7156, 0.7905, 0.7437,
+    0.7946, 0.8248, 0.7700, 0.7629, 0.8121, 0.8520, 0.8312, 0.8414, 0.7869, 0.8296,
+    0.8414, 0.7317
+]).to(device)
 
-    n, d = H1.shape
-    m, _ = H2.shape
+# **🚀 结合 CKA 重新调整剪枝比例**
+min_ratio, max_ratio = 0.3, 0.9  # 剪枝比例范围
 
-    # **初始化 cost_matrix**
-    cost_matrix = torch.zeros(n, m, dtype=torch.float32, device=H1.device)
+# 归一化 CKA 重要性
+cka_importance = (cka_importance - cka_importance.min()) / (cka_importance.max() - cka_importance.min())
 
-    # 🔥 **逐块计算 Cost 矩阵，减少显存占用**
-    for i in range(0, n, chunk_size):
-        for j in range(0, m, chunk_size):
-            sub_H1 = H1[i : i + chunk_size]
-            sub_H2 = H2[j : j + chunk_size]
+# **计算最终剪枝比例**
+adjusted_pruning_ratios = min_ratio + (max_ratio - min_ratio) * (1 - cka_importance) * esd_pruning_ratios
 
-            dist_matrix = torch.cdist(sub_H1, sub_H2, p=2).pow(2)
-            cost_matrix[i : i + chunk_size, j : j + chunk_size] = dist_matrix
+# **🚀 归一化，确保整体 sparsity_ratio 不变**
+scaler = esd_pruning_ratios.sum() / adjusted_pruning_ratios.sum()
+final_pruning_ratios = adjusted_pruning_ratios * scaler
 
-    torch.cuda.empty_cache()  # **释放显存**
-
-    # **🔥 归一化 Cost Matrix，避免数值过大**
-    cost_matrix /= cost_matrix.max() + 1e-6
-
-    # **初始化分布**
-    a = torch.ones(n, device=H1.device) / n
-    b = torch.ones(m, device=H2.device) / m
-
-    u = torch.zeros_like(a)
-    v = torch.zeros_like(b)
-
-    # **🔥 Sinkhorn-Knopp 迭代**
-    for _ in range(max_iter):
-        u_prev = u.clone()
-        v_prev = v.clone()
-
-        u = -torch.logsumexp((-cost_matrix + v[None, :]) / eps, dim=1) + torch.log(a)
-        v = -torch.logsumexp((-cost_matrix + u[:, None]) / eps, dim=0) + torch.log(b)
-
-        # ✅ **数值稳定性检查**
-        if torch.isnan(u).any() or torch.isnan(v).any():
-            print("⚠️ Warning: NaN detected in Sinkhorn iterations")
-            return float('nan')
-
-        # ✅ **提前收敛检查**
-        if torch.norm(u - u_prev) < 1e-6 and torch.norm(v - v_prev) < 1e-6:
-            break
-
-    return (u[:, None] + v[None, :] - cost_matrix).exp().sum()
-
-
-
-# **🔥 计算 Wasserstein**
-layerwise_wasserstein = []
-
-for layer_idx in range(num_layers - 1):
-    H = hidden_states[layer_idx][0].to(torch.float16)
-    H_next = hidden_states[layer_idx + 1][0].to(torch.float16)
-
-    # **🔥 使用 Chunk 计算 Wasserstein，避免 OOM**
-    wd = wasserstein_distance_torch(H, H_next, chunk_size=256)  
-    layerwise_wasserstein.append(wd.item())
-
-# **🔥 归一化 Wasserstein**
-wasserstein_scores = torch.tensor(layerwise_wasserstein, device="cuda")
-wasserstein_scores = (wasserstein_scores - wasserstein_scores.min()) / (wasserstein_scores.max() - wasserstein_scores.min())
-
-# **🔥 输出**
-print("✅ Wasserstein 计算完成")
-print("Wasserstein Scores:", wasserstein_scores.cpu().numpy())
+print("Final Adjusted Pruning Ratios:", final_pruning_ratios.cpu().numpy())
