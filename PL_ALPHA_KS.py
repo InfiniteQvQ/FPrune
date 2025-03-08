@@ -1,46 +1,27 @@
 import torch
 import numpy as np
+import matplotlib.pyplot as plt
+from scipy.stats import gaussian_kde
 from transformers import LlamaModel, AutoTokenizer
 
-def compute_PL_Alpha_KS(H, T, activation="tanh"):
-    """
-    计算 PL_Alpha_KS，每层计算 K 和 T 之间的对齐程度。
-    
-    Args:
-        H (numpy.ndarray): 形状 (seq_len, hidden_dim) 的隐藏状态
-        T (numpy.ndarray): 形状 (seq_len, seq_len) 的目标矩阵
-        activation (str): "tanh" 或 "relu" 激活函数
-    
-    Returns:
-        float: 计算得到的 PL_Alpha_KS 值
-    """
-    # 归一化 H
-    H = H.astype(np.float64)
-    norm_H = np.linalg.norm(H, axis=1, keepdims=True) + 1e-6
-    H = H / norm_H
-    
-    # 计算核矩阵 K
-    K = H @ H.T  # 线性核
-    if activation == "tanh":
-        K = np.tanh(K)  # 非线性变换
-    elif activation == "relu":
-        K = np.maximum(K, 0)  # ReLU 变换
-    else:
-        raise ValueError("Unsupported activation function")
-    
-    # 归一化 T
-    T_norm = np.linalg.norm(T, axis=1, keepdims=True) + 1e-6
-    T = T / T_norm
-    
-    # 计算 PL_Alpha_KS
-    K_norm = np.sqrt(np.sum(K**2)) + 1e-6
-    T_norm = np.sqrt(np.sum(T**2)) + 1e-6
-    inner_product = np.sum(K * T)
-    
-    return inner_product / (K_norm * T_norm)
+def compute_pdf(activations, num_points=100):
+    """计算 PDF（概率密度函数）"""
+    kde = gaussian_kde(activations)
+    x_range = np.linspace(min(activations), max(activations), num_points)
+    pdf_values = kde(x_range)
+    return x_range, pdf_values
 
+def compute_ccdf(activations):
+    """计算 CCDF（补充累积分布函数）"""
+    sorted_activations = np.sort(activations)
+    ccdf_values = 1 - np.arange(1, len(sorted_activations) + 1) / len(sorted_activations)
+    return sorted_activations, ccdf_values
 
-# **加载 LLaMA 模型**
+def compute_layer_importance(x_range, pdf_values):
+    """计算层的重要性 (Layer Importance)"""
+    return np.trapz(np.abs(x_range) * pdf_values, x_range)  # 数值积分计算重要性
+
+# **加载 LLaMA 7B 模型**
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model_name = "pinkmanlove/llama-7b-hf"
 
@@ -53,42 +34,43 @@ model = LlamaModel.from_pretrained(
     device_map="auto"
 )
 
-# **输入处理**
-text = ["LLaMA 7B PL_Alpha_KS computation."]
+# **处理输入**
+text = ["LLaMA 7B Activation Distribution Analysis."]
 inputs = tokenizer(text, return_tensors="pt")
 inputs.pop("token_type_ids", None)
 inputs = {key: val.to(device) for key, val in inputs.items()}
 
-num_runs = 10  # 取 10 次平均
-pl_alpha_ks_results = {i: [] for i in range(model.config.num_hidden_layers)}
+# **获取隐藏状态**
+with torch.no_grad():
+    outputs = model(**inputs)
 
-for run in range(num_runs):
-    with torch.no_grad():
-        outputs = model(**inputs)
+hidden_states = outputs.hidden_states  # (num_layers, batch, seq_len, hidden_dim)
 
-    hidden_states = outputs.hidden_states  # tuple of (num_layers, batch, seq_len, hidden_dim)
-    seq_len = hidden_states[0].shape[1]
+layer_importance_scores = {}  # 存储层重要性得分
+layer_pdf_data = {}  # 存储 PDF 数据
+layer_ccdf_data = {}  # 存储 CCDF 数据
 
-    # **目标矩阵 T（Identity 矩阵）**
-    T = np.eye(seq_len).astype(np.float32)
+# **遍历所有层**
+for layer_idx in range(model.config.num_hidden_layers):
+    activations = hidden_states[layer_idx][0].cpu().numpy().flatten()
 
-    for layer_idx in range(model.config.num_hidden_layers):
-        H = hidden_states[layer_idx][0].cpu().numpy()  # 取 batch 0
-        pl_alpha_ks_value = compute_PL_Alpha_KS(H, T, activation="tanh")
-        if not np.isnan(pl_alpha_ks_value):
-            pl_alpha_ks_results[layer_idx].append(pl_alpha_ks_value)
+    # **计算 PDF**
+    x_range, pdf_values = compute_pdf(activations)
 
-# **计算均值和标准差**
-pl_alpha_ks_mean = {layer: np.mean(values) for layer, values in pl_alpha_ks_results.items() if values}
-pl_alpha_ks_std = {layer: np.std(values) for layer, values in pl_alpha_ks_results.items() if values}
+    # **计算 CCDF**
+    sorted_activations, ccdf_values = compute_ccdf(activations)
 
-for layer in sorted(pl_alpha_ks_mean.keys()):
-    print(f"Layer {layer} PL_Alpha_KS: {pl_alpha_ks_mean[layer]:.4f} ± {pl_alpha_ks_std[layer]:.4f}")
+    # **计算层重要性**
+    layer_importance = compute_layer_importance(x_range, pdf_values)
+    layer_importance_scores[layer_idx] = layer_importance
+    layer_pdf_data[layer_idx] = (x_range, pdf_values)
+    layer_ccdf_data[layer_idx] = (sorted_activations, ccdf_values)
 
-print("Final PL_Alpha_KS Results:", pl_alpha_ks_mean)
+    print(f"Layer {layer_idx} Importance: {layer_importance:.4f}")
 
-res = []
-for i, j in pl_alpha_ks_mean.items():
-    res.append(j)
+# **排序层重要性**
+sorted_importance = sorted(layer_importance_scores.items(), key=lambda x: x[1], reverse=True)
+print("\nFinal Layer Importance Ranking:")
+for layer, score in sorted_importance:
+    print(f"Layer {layer}: {score:.4f}")
 
-print(res)
