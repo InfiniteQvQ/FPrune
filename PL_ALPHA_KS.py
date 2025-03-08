@@ -78,3 +78,7 @@ final_pruning_ratios = adjusted_pruning_ratios * (original_mean / adjusted_mean)
 
 print("Final Adjusted Pruning Ratios:", final_pruning_ratios.cpu().numpy())
 print(final_pruning_ratios.mean())
+a = []
+for i in final_pruning_ratios.cpu().numpy():
+    a.append(i)
+print(a)
