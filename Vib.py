@@ -92,10 +92,10 @@ def prune_llama_model(llama_model, pruning_ratios):
 
 # 🚀 **加载数据集**
 def get_dataloader():
-    cache_dir = "/root/autodl-tmp"  # 🚀 指定缓存目录
+    cache_dir = "/root/autodl-tmp"  # 指定缓存目录
     tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.1-8B", cache_dir=cache_dir)
     
-    dataset = load_dataset("ptb_text_only", "penn_treebank", split="train", cache_dir=cache_dir)  # 🚀 下载数据到 `/root/autodl-tmp`
+    dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="train", cache_dir=cache_dir)  # 🚀 下载数据到 `/root/autodl-tmp`
 
     def tokenize_function(examples):
         return tokenizer(examples["text"], truncation=True, padding="max_length", max_length=512)
