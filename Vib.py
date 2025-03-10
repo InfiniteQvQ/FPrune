@@ -5,7 +5,7 @@ from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from datasets import load_dataset
 import math
-from accelerate import Accelerator  # 确保已安装 accelerate
+from accelerate import Accelerator
 
 # ------------------------------
 # DummyRotaryEmbedding：用于替换原 rotary embedding，避免 NoneType 错误
@@ -14,7 +14,6 @@ class DummyRotaryEmbedding(nn.Module):
     def __init__(self, head_dim):
         super().__init__()
         self.head_dim = head_dim
-
     def forward(self, x, position_embeddings):
         batch_size, seq_len, _ = x.size()
         # 返回全1和全0，使得旋转操作不改变输入
@@ -30,14 +29,12 @@ class VIBMask(nn.Module):
         super().__init__()
         self.mu = nn.Parameter(torch.zeros(size))
         self.sigma = nn.Parameter(torch.ones(size) * pruning_ratio)
-
     def forward(self, prev_mask=None):
         epsilon = torch.randn_like(self.sigma)
         mask = torch.sigmoid(self.mu + epsilon * self.sigma)
         if prev_mask is not None:
             mask = mask * prev_mask
         return mask
-
     def kl_loss(self):
         return -0.5 * torch.mean(1 + self.sigma - self.mu**2 - torch.exp(self.sigma))
 
@@ -60,7 +57,7 @@ class LlamaAttention(nn.Module):
         self.mask_q = VIBMask(self.num_heads, pruning_ratio)
         self.mask_kv = VIBMask(self.num_key_value_heads, pruning_ratio)
 
-        # 替换 rotary embedding
+        # 替换 rotary embedding 为 DummyRotaryEmbedding（可替换为真实实现）
         self.rotary_emb = DummyRotaryEmbedding(self.head_dim)
 
     def forward(self, hidden_states, attention_mask=None, **kwargs):
@@ -71,11 +68,12 @@ class LlamaAttention(nn.Module):
 
         mask_q = self.mask_q()
         query_states = query_states * mask_q
+
         mask_kv = self.mask_kv()
         key_states = key_states * mask_kv
         value_states = value_states * mask_kv
 
-        # 位置编码：传入 dummy 的 position_embeddings
+        # 使用 rotary_emb，传入 position_embeddings 如果有，否则传 None
         if "position_embeddings" in kwargs:
             cos, sin = self.rotary_emb(query_states, kwargs["position_embeddings"])
         else:
@@ -88,7 +86,6 @@ class LlamaAttention(nn.Module):
         attn_output = torch.matmul(attn_weights, value_states)
         attn_output = attn_output.view(batch_size, seq_length, self.hidden_size)
         attn_output = self.o_proj(attn_output)
-
         return attn_output, self.mask_q.kl_loss() + self.mask_kv.kl_loss()
 
 # ------------------------------
@@ -114,7 +111,6 @@ class LlamaMLP(nn.Module):
         hidden_states = F.silu(self.gate_proj(hidden_states) * mask_gate) * (self.up_proj(hidden_states) * mask_up)
         mask_down = self.mask_down()
         hidden_states = self.down_proj(hidden_states) * mask_down
-
         return hidden_states, self.mask_gate.kl_loss() + self.mask_up.kl_loss() + self.mask_down.kl_loss()
 
 # ------------------------------
@@ -204,9 +200,9 @@ def train_mask(model, dataloader, epochs=3, lr=1e-4):
         model.train()
         total_kl_loss = 0
         for step, batch in enumerate(dataloader):
-            # 为保证新版要求，添加 dummy position_embeddings
+            # 为满足新版要求，生成 dummy 的 position_embeddings
             batch_size, seq_length = batch["input_ids"].shape
-            head_dim = model.config.hidden_size // model.config.num_attention_heads
+            head_dim = (model.module.config.hidden_size // model.module.config.num_attention_heads) if hasattr(model, "module") else (model.config.hidden_size // model.config.num_attention_heads)
             dummy_cos = torch.ones(batch_size, seq_length, head_dim, device=batch["input_ids"].device, dtype=torch.float32)
             dummy_sin = torch.zeros(batch_size, seq_length, head_dim, device=batch["input_ids"].device, dtype=torch.float32)
             batch["position_embeddings"] = (dummy_cos, dummy_sin)
