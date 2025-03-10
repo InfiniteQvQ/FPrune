@@ -7,11 +7,13 @@ from datasets import load_dataset
 import math
 from accelerate import Accelerator
 
-# 🚀 VIB 可训练剪枝 Mask
+# ------------------------------
+# VIB 可训练剪枝 Mask
+# ------------------------------
 class VIBMask(nn.Module):
     def __init__(self, size, pruning_ratio=0.5):
         super().__init__()
-        self.mu = nn.Parameter(torch.zeros(size))  # 可训练参数
+        self.mu = nn.Parameter(torch.zeros(size))
         self.sigma = nn.Parameter(torch.ones(size) * pruning_ratio)
 
     def forward(self, prev_mask=None):
@@ -25,7 +27,9 @@ class VIBMask(nn.Module):
         return -0.5 * torch.mean(1 + self.sigma - self.mu ** 2 - torch.exp(self.sigma))
 
 
-# 🚀 Llama Self-Attention（支持剪枝）
+# ------------------------------
+# Llama Self-Attention（支持剪枝）
+# ------------------------------
 class LlamaAttention(nn.Module):
     def __init__(self, config, pruning_ratio=0.5):
         super().__init__()
@@ -39,7 +43,6 @@ class LlamaAttention(nn.Module):
         self.v_proj = nn.Linear(config.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias)
         self.o_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=config.attention_bias)
 
-        # 为 Query 和 Key/Value 添加剪枝 Mask
         self.mask_q = VIBMask(self.num_heads, pruning_ratio)
         self.mask_kv = VIBMask(self.num_key_value_heads, pruning_ratio)
 
@@ -69,7 +72,9 @@ class LlamaAttention(nn.Module):
         return attn_output, self.mask_q.kl_loss() + self.mask_kv.kl_loss()
 
 
-# 🚀 Llama MLP（支持剪枝）
+# ------------------------------
+# Llama MLP（支持剪枝）
+# ------------------------------
 class LlamaMLP(nn.Module):
     def __init__(self, config, pruning_ratio=0.5):
         super().__init__()
@@ -94,7 +99,9 @@ class LlamaMLP(nn.Module):
         return hidden_states, self.mask_gate.kl_loss() + self.mask_up.kl_loss() + self.mask_down.kl_loss()
 
 
-# 🚀 Llama Decoder Layer（支持剪枝）
+# ------------------------------
+# Llama Decoder Layer（支持剪枝）
+# ------------------------------
 class LlamaDecoderLayer(nn.Module):
     def __init__(self, config, layer_idx, pruning_ratio=0.5):
         super().__init__()
@@ -117,7 +124,9 @@ class LlamaDecoderLayer(nn.Module):
         return hidden_states, kl_attn + kl_mlp
 
 
-# 🚀 替换预训练模型中每层的剪枝 Mask
+# ------------------------------
+# 替换预训练模型中每层的剪枝 Mask
+# ------------------------------
 def prune_llama_model(model, pruning_ratios):
     for i, layer in enumerate(model.model.layers):
         pruning_ratio = pruning_ratios[i]
@@ -129,13 +138,31 @@ def prune_llama_model(model, pruning_ratios):
     return model
 
 
-# 🚀 加载数据集（使用 wikitext-2-raw-v1）
+# ------------------------------
+# 自定义 LlamaModel.forward
+# ------------------------------
+def custom_llama_forward(self, input_ids, attention_mask=None, **kwargs):
+    hidden_states = self.embed_tokens(input_ids)
+    kl_total = 0
+    for layer in self.layers:
+        hidden_states, kl_loss = layer(hidden_states, attention_mask)
+        kl_total += kl_loss
+    hidden_states = self.norm(hidden_states)
+    return (hidden_states, kl_total)
+
+# 将自定义 forward 方法绑定到模型内部
+def override_forward(model):
+    model.model.forward = custom_llama_forward.__get__(model.model, type(model.model))
+
+
+# ------------------------------
+# 加载数据集（使用 wikitext-2-raw-v1）
+# ------------------------------
 def get_dataloader():
     cache_dir = "/root/autodl-tmp"
     tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.1-8B", cache_dir=cache_dir)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-
     dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="train", cache_dir=cache_dir)
     def tokenize_function(examples):
         return tokenizer(examples["text"], truncation=True, padding="max_length", max_length=512)
@@ -144,17 +171,20 @@ def get_dataloader():
     return DataLoader(tokenized_dataset, batch_size=4, shuffle=True)
 
 
-# 🚀 冻结非 Mask 参数，仅训练 VIBMask 参数
+# ------------------------------
+# 冻结非 Mask 参数，仅训练 VIBMask 参数
+# ------------------------------
 def freeze_non_mask_params(model):
     for name, param in model.named_parameters():
         if "mask" not in name:
             param.requires_grad = False
 
 
-# 🚀 训练剪枝 Mask（使用 Accelerate 支持多 GPU）
+# ------------------------------
+# 训练剪枝 Mask（使用 Accelerate 支持多 GPU）
+# ------------------------------
 def train_mask(model, dataloader, epochs=3, lr=1e-4):
     accelerator = Accelerator()
-    # 冻结非 Mask 参数
     freeze_non_mask_params(model)
     vib_params = [p for p in model.parameters() if p.requires_grad]
     if not vib_params:
@@ -168,27 +198,33 @@ def train_mask(model, dataloader, epochs=3, lr=1e-4):
         total_kl_loss = 0
         for step, batch in enumerate(dataloader):
             outputs = model(**batch)
-            _, kl_loss = outputs  # 只取 KL 损失
+            # 我们的 custom forward 返回 (hidden_states, kl_total)
+            _, kl_loss = outputs
             loss = kl_loss
             accelerator.backward(loss)
             optimizer.step()
             optimizer.zero_grad()
+
             total_kl_loss += loss.item()
             if step % 50 == 0:
                 print(f"Epoch {epoch+1}, Step {step}, KL Loss: {loss.item()}")
         print(f"Epoch {epoch+1} finished, Avg KL Loss: {total_kl_loss / len(dataloader)}")
 
 
+# ------------------------------
+# 主流程
+# ------------------------------
 if __name__ == "__main__":
     cache_dir = "/root/autodl-tmp/llm_weights"
-    # 不传 device_map，让 Accelerate 处理多 GPU 分配
+    # 不使用 device_map="auto"，让 Accelerate 管理多 GPU
     model = AutoModelForCausalLM.from_pretrained(
         "meta-llama/Llama-3.1-8B",
         cache_dir=cache_dir,
         torch_dtype=torch.float16
     )
-
-    # 生成每层剪枝比例，例如：每层比例不同
+    # 使用 Accelerate 进行多 GPU 分布式训练
+    override_forward(model)
+    # 生成每层剪枝比例（例如：每层比例不同）
     pruning_ratios = [0.7 * i for i in range(model.config.num_hidden_layers)]
     model = prune_llama_model(model, pruning_ratios)
 
