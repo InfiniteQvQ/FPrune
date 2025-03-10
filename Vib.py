@@ -1,100 +1,112 @@
-# train_vib_llama.py
-
 import torch
-from torch.utils.data import DataLoader
-from datasets import load_dataset
-from accelerate import Accelerator
-from transformers import AutoTokenizer
-import os
+import torch.nn as nn
+from transformers import LlamaForCausalLM, LlamaConfig, AutoModelForCausalLM
 
-from my_llama_vib import (
-    VIBLlamaForCausalLM,
-    apply_vib_pruning_ratios,
-    freeze_non_mask_params,
-)
+class InformationBottleneck(nn.Module):
+    def __init__(self, dim, prune_ratio=0.5):
+        super().__init__()
+        self.dim = dim
+        self.prune_ratio = prune_ratio  # 该层的目标剪枝比例
+        self.epsilon = 1e-8
+        
+        self.mu = nn.Parameter(torch.ones(dim))  # 重要性参数
+        self.logD = nn.Parameter(torch.zeros(dim))  # 计算 logα
+    
+    def get_mask(self):
+        """ 根据目标剪枝比例计算 mask """
+        logalpha = self.logD - torch.log(self.mu.pow(2) + self.epsilon)
+        num_pruned = int(self.dim * self.prune_ratio)
+        
+        sorted_indices = torch.argsort(logalpha)
+        mask = torch.ones_like(logalpha)
+        mask[sorted_indices[:num_pruned]] = 0  # 剪枝
+        
+        return mask.float()
 
-def main():
-    accelerator = Accelerator()
-    ckpt_path = "meta-llama/Llama-3.1-8B"
-    print(f"Loading LLaMA 3.1-8B from {ckpt_path}...")
-    cache_dir = "/root/autodl-tmp/llm_weights"
-    model = VIBLlamaForCausalLM.from_pretrained(
-        ckpt_path,
-        cache_dir=cache_dir,
-        torch_dtype=torch.float16,
-        device_map="auto",   # 让 accelerate + HF handle 2 GPU
-    )
-    # 强制 vib_layers
-    model.config.vib_layers = True
-    model.config.att_mul = 1.0   # 你自定义
-    model.config.inter_mul = 1.0 # 你自定义
+    def forward(self, x):
+        mask = self.get_mask()
+        return x * mask
 
-    # 1) 分配每层剪枝率
-    n_layer = model.config.num_hidden_layers
-    # 例子：全部=0.5
-    pruning_ratios = [0.5]*n_layer
-    apply_vib_pruning_ratios(model, pruning_ratios)
 
-    # 2) 冻结非mask
-    freeze_non_mask_params(model)
+def compute_pruning_ratios(layer_config, target_sparsity):
+    total_params = sum(layer_config.values())
+    prune_target = total_params * target_sparsity
+    
+    pruning_ratios = {}
+    for key, param_count in layer_config.items():
+        pruning_ratios[key] = prune_target * (param_count / total_params) / param_count
+    
+    return pruning_ratios
 
-    # 检查一下可训练参数
-    vib_params = [n for n,p in model.named_parameters() if p.requires_grad]
-    if len(vib_params)==0:
-        raise ValueError("空列表，检查 `ib_` / `hidden_mask`等命名是否成功！")
 
-    # 3) tokenizer + dataset
-    tokenizer = AutoTokenizer.from_pretrained(ckpt_path)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+class LlamaDecoderLayer(nn.Module):
+    def __init__(self, config, layer_idx):
+        super().__init__()
+        target_sparsity = 0.7  # 目标剪枝比例
+        
+        layer_config = {
+            "q_proj": config.hidden_size * config.hidden_size,
+            "k_proj": config.hidden_size * config.hidden_size,
+            "v_proj": config.hidden_size * config.hidden_size,
+            "o_proj": config.hidden_size * config.hidden_size,
+            "gate_proj": config.hidden_size * config.ffn_dim,
+            "up_proj": config.hidden_size * config.ffn_dim,
+            "down_proj": config.ffn_dim * config.hidden_size
+        }
+        
+        pruning_ratios = compute_pruning_ratios(layer_config, target_sparsity)
 
-    ds = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
-    def tokenize_fn(examples):
-        return tokenizer(examples["text"], padding="max_length", truncation=True, max_length=256)
-    ds = ds.map(tokenize_fn, batched=True, remove_columns=["text"])
-    ds.set_format(type="torch", columns=["input_ids","attention_mask"])
-    dl = DataLoader(ds, batch_size=1, shuffle=True)
+        self.q_proj = nn.Linear(config.hidden_size, config.hidden_size)
+        self.k_proj = nn.Linear(config.hidden_size, config.hidden_size)
+        self.v_proj = nn.Linear(config.hidden_size, config.hidden_size)
+        self.o_proj = nn.Linear(config.hidden_size, config.hidden_size)
+        
+        self.gate_proj = nn.Linear(config.hidden_size, config.ffn_dim)
+        self.up_proj = nn.Linear(config.hidden_size, config.ffn_dim)
+        self.down_proj = nn.Linear(config.ffn_dim, config.hidden_size)
+        
+        self.ib_q = InformationBottleneck(config.hidden_size, pruning_ratios["q_proj"])
+        self.ib_k = InformationBottleneck(config.hidden_size, pruning_ratios["k_proj"])
+        self.ib_v = InformationBottleneck(config.hidden_size, pruning_ratios["v_proj"])
+        self.ib_o = InformationBottleneck(config.hidden_size, pruning_ratios["o_proj"])
+        
+        self.ib_gate = InformationBottleneck(config.ffn_dim, pruning_ratios["gate_proj"])
+        self.ib_up = InformationBottleneck(config.ffn_dim, pruning_ratios["up_proj"])
+        self.ib_down = InformationBottleneck(config.hidden_size, pruning_ratios["down_proj"])
 
-    # 4) 优化器
-    optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=1e-4)
+    def forward(self, x):
+        q = self.ib_q(self.q_proj(x))
+        k = self.ib_k(self.k_proj(x))
+        v = self.ib_v(self.v_proj(x))
+        o = self.ib_o(self.o_proj(x))
+        
+        x = self.ib_gate(self.gate_proj(x))
+        x = self.ib_up(self.up_proj(x))
+        x = self.ib_down(self.down_proj(x))
 
-    # 5) accelerate prepare
-    model, optimizer, dl = accelerator.prepare(model, optimizer, dl)
-    model.train()
+        return x
 
-    # 6) 训练loop
-    steps=50
-    for step, batch in enumerate(dl):
-        if step>=steps:
-            break
-        input_ids = batch["input_ids"]
-        attention_mask = batch["attention_mask"]
 
-        # 生成 position_ids
-        pos_ids = attention_mask.cumsum(-1)-1
-        pos_ids.masked_fill_(attention_mask==0, 0)
-
-        out = model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            position_ids=pos_ids,
-            labels=input_ids
+class PrunedLlamaModel(nn.Module):
+    def __init__(self, model_name="meta-llama/Meta-Llama-3-8B"):
+        super().__init__()
+        cache_dir = "/root/autodl-tmp/llm_weights"
+        self.config = LlamaConfig.from_pretrained(model_name)
+        model = AutoModelForCausalLM.from_pretrained(
+            "meta-llama/Llama-3.1-8B",
+            cache_dir=cache_dir,
+            device_map="auto",  # 让 Hugging Face 自动分配多个 GPU
+            torch_dtype=torch.float16
         )
-        ce_loss = out.loss
-        kl = model.get_vib_kl_loss()
-        loss = ce_loss + 0.01*kl
 
-        accelerator.backward(loss)
-        optimizer.step()
-        optimizer.zero_grad()
+        self.model.model.layers = nn.ModuleList([
+            LlamaDecoderLayer(self.config, i) for i in range(self.config.num_hidden_layers)
+        ])
 
-        if step%10==0:
-            accelerator.print(f"step={step}, CE={ce_loss.item():.4f}, KL={kl.item():.4f}, total={loss.item():.4f}")
+    def forward(self, input_ids, attention_mask=None):
+        return self.model(input_ids, attention_mask=attention_mask)
 
-    # 7) 保存
-    accelerator.print("训练结束，保存...")
-    unwrapped = accelerator.unwrap_model(model)
-    unwrapped.save_pretrained("pruned_llama_3.1_8b_vib", safe_serialization=False)
 
-if __name__=="__main__":
-    main()
+if __name__ == "__main__":
+    model = PrunedLlamaModel()
+    print("Pruned LLaMA model loaded successfully.")
