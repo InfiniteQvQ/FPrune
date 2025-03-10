@@ -33,7 +33,8 @@ def train_vib_mask(mask, layer, sparsity_target, epochs=100, lr=1e-3):
 
 
 def prune_llama_layer(llama_model, pruning_ratios):
-    for layer_idx, layer in enumerate(llama_model.layers):
+    """ 对 Llama3 模型的 Transformer 层进行剪枝 """
+    for layer_idx, layer in enumerate(llama_model.model.layers):  # 这里改成 model.layers
         layer_sparsity = pruning_ratios[layer_idx]
         for sub_layer_name in ["gqa", "out", "gate", "up", "down"]:
             if hasattr(layer, sub_layer_name):
@@ -42,6 +43,7 @@ def prune_llama_layer(llama_model, pruning_ratios):
                 bin_mask = train_vib_mask(mask, sub_layer.weight, layer_sparsity)
                 sub_layer.weight.data *= bin_mask
     return llama_model
+
 
 
 def optimize_pruned_model(model):
