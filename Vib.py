@@ -8,7 +8,7 @@ import math
 from accelerate import Accelerator
 
 # ------------------------------
-# DummyRotaryEmbedding：替换原有 rotary embedding
+# DummyRotaryEmbedding：用来替换原 rotary embedding，避免 NoneType 错误
 # ------------------------------
 class DummyRotaryEmbedding(nn.Module):
     def __init__(self, head_dim):
@@ -17,7 +17,7 @@ class DummyRotaryEmbedding(nn.Module):
     def forward(self, x, position_ids):
         batch_size = x.size(0)
         seq_len = x.size(2)
-        # 返回 cos=1, sin=0，使得应用后的旋转操作不改变输入
+        # 返回全1和全0，使旋转操作不改变输入
         cos = torch.ones(batch_size, seq_len, self.head_dim, device=x.device, dtype=x.dtype)
         sin = torch.zeros(batch_size, seq_len, self.head_dim, device=x.device, dtype=x.dtype)
         return cos, sin
@@ -49,22 +49,28 @@ class LlamaAttention(nn.Module):
         self.num_key_value_heads = config.num_key_value_heads
         self.head_dim = config.hidden_size // self.num_heads
         self.hidden_size = config.hidden_size
+
         self.q_proj = nn.Linear(config.hidden_size, self.num_heads * self.head_dim, bias=config.attention_bias)
         self.k_proj = nn.Linear(config.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias)
         self.v_proj = nn.Linear(config.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias)
         self.o_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=config.attention_bias)
+
         self.mask_q = VIBMask(self.num_heads, pruning_ratio)
         self.mask_kv = VIBMask(self.num_key_value_heads, pruning_ratio)
+
     def forward(self, hidden_states, attention_mask=None):
         batch_size, seq_length, _ = hidden_states.shape
         query_states = self.q_proj(hidden_states).view(batch_size, seq_length, self.num_heads, self.head_dim)
         key_states = self.k_proj(hidden_states).view(batch_size, seq_length, self.num_key_value_heads, self.head_dim)
         value_states = self.v_proj(hidden_states).view(batch_size, seq_length, self.num_key_value_heads, self.head_dim)
+
         mask_q = self.mask_q()
         query_states = query_states * mask_q
+
         mask_kv = self.mask_kv()
         key_states = key_states * mask_kv
         value_states = value_states * mask_kv
+
         attn_weights = torch.matmul(query_states, key_states.transpose(-2, -1)) / math.sqrt(self.head_dim)
         if attention_mask is not None:
             attn_weights = attn_weights + attention_mask
@@ -82,12 +88,15 @@ class LlamaMLP(nn.Module):
         super().__init__()
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.intermediate_size
+
         self.gate_proj = nn.Linear(config.hidden_size, config.intermediate_size)
         self.up_proj = nn.Linear(config.hidden_size, config.intermediate_size)
         self.down_proj = nn.Linear(config.intermediate_size, config.hidden_size)
+
         self.mask_gate = VIBMask(config.intermediate_size, pruning_ratio)
         self.mask_up = VIBMask(config.intermediate_size, pruning_ratio)
         self.mask_down = VIBMask(config.hidden_size, pruning_ratio)
+
     def forward(self, hidden_states):
         mask_gate = self.mask_gate()
         mask_up = self.mask_up()
@@ -118,7 +127,7 @@ class LlamaDecoderLayer(nn.Module):
         return hidden_states, kl_attn + kl_mlp
 
 # ------------------------------
-# 替换预训练模型中每层的剪枝 Mask
+# 覆盖预训练模型中每层的剪枝 Mask
 # ------------------------------
 def prune_llama_model(model, pruning_ratios):
     for i, layer in enumerate(model.model.layers):
@@ -131,13 +140,32 @@ def prune_llama_model(model, pruning_ratios):
     return model
 
 # ------------------------------
-# Override rotary embedding with dummy module to avoid errors
+# Override rotary embedding with dummy module
 # ------------------------------
 def override_rotary_emb(model):
     for layer in model.model.layers:
         if hasattr(layer.self_attn, "rotary_emb"):
             head_dim = layer.self_attn.head_dim
             layer.self_attn.rotary_emb = DummyRotaryEmbedding(head_dim)
+
+# ------------------------------
+# DummyRotaryEmbedding 已经定义在上面（见 DummyRotaryEmbedding 类）
+# ------------------------------
+
+# ------------------------------
+# 自定义 forward：遍历 decoder 层并累加 KL 损失
+# ------------------------------
+def custom_llama_forward(self, input_ids, attention_mask=None, **kwargs):
+    hidden_states = self.embed_tokens(input_ids)
+    kl_total = 0
+    for layer in self.layers:
+        hidden_states, kl_loss = layer(hidden_states, attention_mask)
+        kl_total += kl_loss
+    hidden_states = self.norm(hidden_states)
+    return hidden_states, kl_total
+
+def override_forward(model):
+    model.model.forward = custom_llama_forward.__get__(model.model, type(model.model))
 
 # ------------------------------
 # 加载数据集（使用 wikitext-2-raw-v1）
@@ -178,7 +206,8 @@ def train_mask(model, dataloader, epochs=3, lr=1e-4):
         total_kl_loss = 0
         for step, batch in enumerate(dataloader):
             outputs = model(**batch)
-            _, kl_loss = outputs  # custom forward returns (hidden_states, kl_total)
+            # custom forward 返回 (hidden_states, kl_total)
+            _, kl_loss = outputs
             loss = kl_loss
             accelerator.backward(loss)
             optimizer.step()
@@ -188,14 +217,22 @@ def train_mask(model, dataloader, epochs=3, lr=1e-4):
                 print(f"Epoch {epoch+1}, Step {step}, KL Loss: {loss.item()}")
         print(f"Epoch {epoch+1} finished, Avg KL Loss: {total_kl_loss / len(dataloader)}")
 
+# ------------------------------
+# 主流程
+# ------------------------------
 if __name__ == "__main__":
     cache_dir = "/root/autodl-tmp/llm_weights"
+    # 不传 device_map，让 Accelerate 处理多 GPU
     model = AutoModelForCausalLM.from_pretrained(
         "meta-llama/Llama-3.1-8B",
         cache_dir=cache_dir,
         torch_dtype=torch.float16
     )
+    # 覆盖 rotary embedding，防止 NoneType 错误
     override_rotary_emb(model)
+    # 覆盖 forward 方法，使其返回 (hidden_states, kl_total)
+    override_forward(model)
+    # 生成每层剪枝比例（例如：每层比例不同）
     pruning_ratios = [0.7 * i for i in range(model.config.num_hidden_layers)]
     model = prune_llama_model(model, pruning_ratios)
     dataloader = get_dataloader()
