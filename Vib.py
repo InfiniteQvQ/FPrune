@@ -10,24 +10,18 @@ import math
 class VIBMask(nn.Module):
     def __init__(self, size, pruning_ratio=0.5):
         super().__init__()
-        self.mu = nn.Parameter(torch.zeros(size))  # 需要梯度
-        self.sigma = nn.Parameter(torch.ones(size) * pruning_ratio)  # 需要梯度
+        self.mu = nn.Parameter(torch.zeros(size))
+        self.sigma = nn.Parameter(torch.ones(size) * pruning_ratio)
 
     def forward(self, prev_mask=None):
-        """ 计算剪枝 mask，同时考虑前面层的 token 依赖性 """
         epsilon = torch.randn_like(self.sigma)
         mask = torch.sigmoid(self.mu + epsilon * self.sigma)
-
-        # 🚀 **让当前层剪枝 Mask 受前面层影响**
         if prev_mask is not None:
             mask = mask * prev_mask
-
         return mask
 
     def kl_loss(self):
-        """ 计算 KL 散度 loss，让剪枝 Mask 可训练 """
         return -0.5 * torch.mean(1 + self.sigma - self.mu ** 2 - torch.exp(self.sigma))
-
 
 # 🚀 **Llama Self Attention（支持剪枝）**
 class LlamaAttention(nn.Module):
@@ -80,22 +74,81 @@ class LlamaAttention(nn.Module):
         # 🚀 **返回 KL Loss**
         return attn_output, self.mask_q.kl_loss() + self.mask_kv.kl_loss()
 
+# 🚀 **Llama MLP（支持剪枝）**
+class LlamaMLP(nn.Module):
+    def __init__(self, config: LlamaConfig, pruning_ratio=0.5):
+        super().__init__()
+        self.hidden_size = config.hidden_size
+        self.intermediate_size = config.intermediate_size
 
-# 🚀 **剪枝 Llama3**
-def prune_llama_model(llama_model, pruning_ratios):
-    """ 🚀 TVA-Prune 剪枝 Llama3 模型 """
-    for i, layer in enumerate(llama_model.model.layers):  
-        layer.self_attn.mask_q = VIBMask(layer.self_attn.num_heads, pruning_ratios[i])
-        layer.self_attn.mask_kv = VIBMask(layer.self_attn.num_key_value_heads, pruning_ratios[i])
-    return llama_model
+        self.gate_proj = nn.Linear(config.hidden_size, config.intermediate_size)
+        self.up_proj = nn.Linear(config.hidden_size, config.intermediate_size)
+        self.down_proj = nn.Linear(config.intermediate_size, config.hidden_size)
+
+        # 🚀 **为 `gate_proj`、`up_proj`、`down_proj` 添加可训练剪枝 Mask**
+        self.mask_gate = VIBMask(config.intermediate_size, pruning_ratio)
+        self.mask_up = VIBMask(config.intermediate_size, pruning_ratio)
+        self.mask_down = VIBMask(config.hidden_size, pruning_ratio)
+
+    def forward(self, hidden_states):
+        # 🚀 **剪枝 `gate_proj` 和 `up_proj`**
+        mask_gate = self.mask_gate()
+        mask_up = self.mask_up()
+
+        hidden_states = F.silu(self.gate_proj(hidden_states) * mask_gate) * (self.up_proj(hidden_states) * mask_up)
+
+        # 🚀 **剪枝 `down_proj`**
+        mask_down = self.mask_down()
+        hidden_states = self.down_proj(hidden_states) * mask_down
+
+        # 🚀 **返回 KL Loss**
+        return hidden_states, self.mask_gate.kl_loss() + self.mask_up.kl_loss() + self.mask_down.kl_loss()
+
+# 🚀 **Llama Decoder 层**
+class LlamaDecoderLayer(nn.Module):
+    def __init__(self, config: LlamaConfig, layer_idx, pruning_ratio=0.5):
+        super().__init__()
+        self.hidden_size = config.hidden_size
+        self.attention = LlamaAttention(config, pruning_ratio)
+        self.mlp = LlamaMLP(config, pruning_ratio)
+        self.norm_1 = nn.LayerNorm(config.hidden_size)
+        self.norm_2 = nn.LayerNorm(config.hidden_size)
+
+    def forward(self, hidden_states, attention_mask=None):
+        residual = hidden_states
+        hidden_states = self.norm_1(hidden_states)
+        hidden_states, kl_attn = self.attention(hidden_states, attention_mask)
+        hidden_states = residual + hidden_states
+
+        residual = hidden_states
+        hidden_states = self.norm_2(hidden_states)
+        hidden_states, kl_mlp = self.mlp(hidden_states)
+        hidden_states = residual + hidden_states
+
+        return hidden_states, kl_attn + kl_mlp  # 🚀 **累加 KL 损失**
+
+# 🚀 **Llama 剪枝**
+def prune_llama_model(model, pruning_ratios):
+    """ 🚀 **按照 `pruning_ratios` 剪枝 Llama 模型** """
+    for i, layer in enumerate(model.model.layers):
+        pruning_ratio = pruning_ratios[i]
+        layer.attention.mask_q = VIBMask(layer.attention.num_heads, pruning_ratio)
+        layer.attention.mask_kv = VIBMask(layer.attention.num_key_value_heads, pruning_ratio)
+        layer.mlp.mask_gate = VIBMask(layer.mlp.intermediate_size, pruning_ratio)
+        layer.mlp.mask_up = VIBMask(layer.mlp.intermediate_size, pruning_ratio)
+        layer.mlp.mask_down = VIBMask(layer.mlp.hidden_size, pruning_ratio)
+    return model
 
 
-# 🚀 **加载数据集**
 def get_dataloader():
-    cache_dir = "/root/autodl-tmp"  # 指定缓存目录
+    cache_dir = "/root/autodl-tmp"  # 🚀 指定缓存目录
     tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.1-8B", cache_dir=cache_dir)
-    
-    dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="train", cache_dir=cache_dir)  # 🚀 下载数据到 `/root/autodl-tmp`
+
+    # 🚀 **修正 tokenizer，没有 pad_token，使用 eos_token 代替**
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="train", cache_dir=cache_dir)
 
     def tokenize_function(examples):
         return tokenizer(examples["text"], truncation=True, padding="max_length", max_length=512)
