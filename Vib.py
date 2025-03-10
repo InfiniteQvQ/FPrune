@@ -11,7 +11,7 @@ from accelerate import Accelerator
 class VIBMask(nn.Module):
     def __init__(self, size, pruning_ratio=0.5):
         super().__init__()
-        self.mu = nn.Parameter(torch.zeros(size))
+        self.mu = nn.Parameter(torch.zeros(size))  # 可训练参数
         self.sigma = nn.Parameter(torch.ones(size) * pruning_ratio)
 
     def forward(self, prev_mask=None):
@@ -39,6 +39,7 @@ class LlamaAttention(nn.Module):
         self.v_proj = nn.Linear(config.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias)
         self.o_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=config.attention_bias)
 
+        # 为 Query 和 Key/Value 添加剪枝 Mask
         self.mask_q = VIBMask(self.num_heads, pruning_ratio)
         self.mask_kv = VIBMask(self.num_key_value_heads, pruning_ratio)
 
@@ -116,7 +117,7 @@ class LlamaDecoderLayer(nn.Module):
         return hidden_states, kl_attn + kl_mlp
 
 
-# 🚀 根据每层分配剪枝比例替换 Mask
+# 🚀 替换预训练模型中每层的剪枝 Mask
 def prune_llama_model(model, pruning_ratios):
     for i, layer in enumerate(model.model.layers):
         pruning_ratio = pruning_ratios[i]
@@ -160,7 +161,6 @@ def train_mask(model, dataloader, epochs=3, lr=1e-4):
         raise ValueError("optimizer got an empty parameter list; check that VIBMask parameters are not frozen.")
     optimizer = torch.optim.AdamW(vib_params, lr=lr)
 
-    # 用 accelerate 准备模型、优化器和数据加载器
     model, optimizer, dataloader = accelerator.prepare(model, optimizer, dataloader)
 
     for epoch in range(epochs):
@@ -181,15 +181,14 @@ def train_mask(model, dataloader, epochs=3, lr=1e-4):
 
 if __name__ == "__main__":
     cache_dir = "/root/autodl-tmp/llm_weights"
-    # 使用 device_map="auto" 让 Accelerate 分配多 GPU（例如 2 GPU）
+    # 不传 device_map，让 Accelerate 处理多 GPU 分配
     model = AutoModelForCausalLM.from_pretrained(
         "meta-llama/Llama-3.1-8B",
         cache_dir=cache_dir,
-        device_map="auto",
         torch_dtype=torch.float16
     )
 
-    # 生成每层剪枝比例（例如每层比例不同）
+    # 生成每层剪枝比例，例如：每层比例不同
     pruning_ratios = [0.7 * i for i in range(model.config.num_hidden_layers)]
     model = prune_llama_model(model, pruning_ratios)
 
