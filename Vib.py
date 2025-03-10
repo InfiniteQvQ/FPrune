@@ -16,7 +16,7 @@ class DummyRotaryEmbedding(nn.Module):
         self.head_dim = head_dim
     def forward(self, x, position_embeddings):
         batch_size, seq_len, _ = x.size()
-        # 返回全1和全0，使得旋转操作不改变输入
+        # 返回全1和全0，使得旋转操作对输入无影响
         cos = torch.ones(batch_size, seq_len, self.head_dim, device=x.device, dtype=x.dtype)
         sin = torch.zeros(batch_size, seq_len, self.head_dim, device=x.device, dtype=x.dtype)
         return cos, sin
@@ -57,26 +57,25 @@ class LlamaAttention(nn.Module):
         self.mask_q = VIBMask(self.num_heads, pruning_ratio)
         self.mask_kv = VIBMask(self.num_key_value_heads, pruning_ratio)
 
-        # 使用 DummyRotaryEmbedding 作为位置编码（你可替换为真实实现）
+        # 替换 rotary embedding（使用 DummyRotaryEmbedding）
         self.rotary_emb = DummyRotaryEmbedding(self.head_dim)
 
     def forward(self, hidden_states, attention_mask=None, **kwargs):
         batch_size, seq_length, _ = hidden_states.shape
+
         query_states = self.q_proj(hidden_states).view(batch_size, seq_length, self.num_heads, self.head_dim)
         key_states = self.k_proj(hidden_states).view(batch_size, seq_length, self.num_key_value_heads, self.head_dim)
         value_states = self.v_proj(hidden_states).view(batch_size, seq_length, self.num_key_value_heads, self.head_dim)
 
         mask_q = self.mask_q()
         query_states = query_states * mask_q
+
         mask_kv = self.mask_kv()
         key_states = key_states * mask_kv
         value_states = value_states * mask_kv
 
-        # 如果传入了 position_embeddings，则使用它；否则传 None
-        if "position_embeddings" in kwargs:
-            cos, sin = self.rotary_emb(query_states, kwargs["position_embeddings"])
-        else:
-            cos, sin = self.rotary_emb(query_states, None)
+        # 本示例中不传递 position_embeddings，因此调用 rotary_emb 时传入 None
+        cos, sin = self.rotary_emb(query_states, None)
 
         attn_weights = torch.matmul(query_states, key_states.transpose(-2, -1)) / math.sqrt(self.head_dim)
         if attention_mask is not None:
@@ -137,7 +136,7 @@ class LlamaDecoderLayer(nn.Module):
 # 自定义 forward：遍历 decoder 层并累加 KL 损失
 # ------------------------------
 def custom_llama_forward(self, input_ids, attention_mask=None, **kwargs):
-    # 删除不需要的 position_embeddings 参数，防止下游模块报错
+    # 删除额外参数，防止下游模块报错
     kwargs.pop("position_embeddings", None)
     hidden_states = self.embed_tokens(input_ids)
     kl_total = 0
@@ -201,13 +200,7 @@ def train_mask(model, dataloader, epochs=3, lr=1e-4):
         model.train()
         total_kl_loss = 0
         for step, batch in enumerate(dataloader):
-            # 为满足新版要求，生成 dummy 的 position_embeddings
-            batch_size, seq_length = batch["input_ids"].shape
-            head_dim = (model.module.config.hidden_size // model.module.config.num_attention_heads) if hasattr(model, "module") else (model.config.hidden_size // model.config.num_attention_heads)
-            dummy_cos = torch.ones(batch_size, seq_length, head_dim, device=batch["input_ids"].device, dtype=torch.float32)
-            dummy_sin = torch.zeros(batch_size, seq_length, head_dim, device=batch["input_ids"].device, dtype=torch.float32)
-            batch["position_embeddings"] = (dummy_cos, dummy_sin)
-            
+            # 在自定义 forward 中已经删除 position_embeddings 参数，因此不再传入
             outputs = model(**batch)
             _, kl_loss = outputs  # custom forward 返回 (hidden_states, kl_total)
             loss = kl_loss
