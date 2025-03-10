@@ -138,7 +138,7 @@ def prune_llama_model(llama_model, pruning_ratios):
 if __name__ == "__main__":
     from transformers import AutoModelForCausalLM
 
-    cache_dir = "/root/autodl-tmp/llama_weights"
+    cache_dir = "/root/autodl-tmp/llm_weights"
 
     # 1️⃣ 加载 Llama
     model = AutoModelForCausalLM.from_pretrained(
