@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import AutoModelForCausalLM, AutoTokenizer, LlamaConfig, LlamaPreTrainedModel
+from transformers import AutoModelForCausalLM, AutoTokenizer, LlamaConfig
 from datasets import load_dataset
 from torch.utils.data import DataLoader
 import math
@@ -35,7 +35,6 @@ class LlamaAttention(nn.Module):
         super().__init__()
         self.num_heads = config.num_attention_heads
         self.num_key_value_heads = config.num_key_value_heads
-        self.num_key_value_groups = self.num_heads // self.num_key_value_heads  # GQA 共享比例
         self.head_dim = config.hidden_size // self.num_heads
         self.hidden_size = config.hidden_size
 
@@ -105,29 +104,37 @@ def get_dataloader():
     return DataLoader(tokenized_datasets, batch_size=4, shuffle=True)
 
 
-# 🚀 **训练 Llama3**
-def train(model, dataloader, epochs=3, lr=1e-5):
+# 🚀 **训练剪枝 Mask**
+def train_mask(model, dataloader, epochs=3, lr=1e-4):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+
+    # 🚀 **冻结 Llama3 的所有权重**
+    for param in model.parameters():
+        param.requires_grad = False
+
+    # 🚀 **只训练剪枝 Mask**
+    vib_params = [p for p in model.parameters() if p.requires_grad]
+    optimizer = torch.optim.AdamW(vib_params, lr=lr)
 
     for epoch in range(epochs):
         model.train()
-        total_loss = 0
+        total_kl_loss = 0
+
         for step, batch in enumerate(dataloader):
             batch = {k: v.to(device) for k, v in batch.items()}
-            outputs, kl_loss = model(**batch)
+            _, kl_loss = model(**batch)  # 🚀 **只计算 KL 损失**
 
-            loss = outputs.loss + kl_loss  # 🚀 **总 Loss = 交叉熵 + KL 损失**
+            loss = kl_loss
             loss.backward()
             optimizer.step()
             optimizer.zero_grad()
 
-            total_loss += loss.item()
+            total_kl_loss += loss.item()
             if step % 50 == 0:
-                print(f"Epoch {epoch+1}, Step {step}, Loss: {loss.item()}")
+                print(f"Epoch {epoch+1}, Step {step}, KL Loss: {loss.item()}")
 
-        print(f"Epoch {epoch+1} finished, Avg Loss: {total_loss / len(dataloader)}")
+        print(f"Epoch {epoch+1} finished, Avg KL Loss: {total_kl_loss / len(dataloader)}")
 
 
 if __name__ == "__main__":
@@ -140,6 +147,6 @@ if __name__ == "__main__":
     # 🚀 剪枝模型
     model = prune_llama_model(model, pruning_ratios)
 
-    # 🚀 训练
+    # 🚀 训练剪枝 Mask
     train_dataloader = get_dataloader()
-    train(model, train_dataloader)
+    train_mask(model, train_dataloader)
