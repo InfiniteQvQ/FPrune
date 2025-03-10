@@ -502,46 +502,39 @@ def prune_barber(args, dense_model, sparse_model, tokenizer, device=torch.device
 
     config = dense_model.config
 
-    print("loading calibration data")
-    dataloader, _ = get_loaders("c4", nsamples=args.nsamples, seed=args.seed, seqlen=dense_model.seqlen, tokenizer=tokenizer)
+    print("loading calibdation data")
+    dataloader, _ = get_loaders("c4",nsamples=args.nsamples,seed=args.seed,seqlen=dense_model.seqlen,tokenizer=tokenizer)
     print("dataset loading complete")
     
     with torch.no_grad():
         inps, outs, attention_mask, position_ids = prepare_calibration_input(dense_model, dataloader, args.nsamples, device)
-
+    
     dense_layers = dense_model.model.layers
     sparse_layers = sparse_model.model.layers
 
-    progress_bar = tqdm(range(len(sparse_layers) * args.nsamples * 2), desc="Rebuilding compressed model: ")
-
+    progress_bar = tqdm(range(len(sparse_layers)*args.nsamples*2), desc="Rebuilding compressed model: ")
     for i in range(len(sparse_layers)):
         if DEBUG:
             print(f"Rebuilding layer {i} ...")
-        
         dense_layer = dense_layers[0]
         sparse_layer = sparse_layers[i]
+
         ref_subset = find_layers(sparse_layer)
-
-        # ✅ **手动分配 GPU**
-        if f"model.layers.{i}" in dense_model.hf_device_map:
-            dev = dense_model.hf_device_map[f"model.layers.{i}"]
-        else:
-            dev = "cuda:1" if i % 2 == 0 else "cuda:0"  # ✅ **交替分配 GPU**
         
-        inps, outs, attention_mask, position_ids = (
-            inps.to(dev), outs.to(dev), attention_mask.to(dev), position_ids.to(dev)
-        )
-
-        # Self-Attention
+        if f"model.layers.{i}" in dense_model.hf_device_map:   ## handle the case for llama-30B and llama-65B, when the device map has multiple GPUs;
+            dev = dense_model.hf_device_map[f"model.layers.{i}"]
+            inps, outs, attention_mask, position_ids = inps.to(dev), outs.to(dev), attention_mask.to(dev), position_ids.to(dev)
+            
+        # self-attn
         attention = dense_layer.self_attn
-        attn_subset = find_layers(attention, name="self_attn")
+        attn_subset = find_layers(attention,name="self_attn")
         attentiongpt = LlamaAttentionGPT(attention, attention_mask=attention_mask, position_ids=position_ids)
-
+    
         def input_layernorm():
             def tmp(_, inp, out):
                 attentiongpt.get_input(out[0].data)
             return tmp
-
+    
         def self_attn():
             def tmp(_, inp, out):
                 attentiongpt.get_output(out[0][0].data)
@@ -551,19 +544,21 @@ def prune_barber(args, dense_model, sparse_model, tokenizer, device=torch.device
         handles = []
         handles.append(sparse_layer.input_layernorm.register_forward_hook(input_layernorm()))
         handles.append(sparse_layer.self_attn.register_forward_hook(self_attn()))
-        
         for j in range(args.nsamples):
             temp = sparse_layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
             outs[j] = temp.clone().detach()
             del temp
             torch.cuda.empty_cache()
             progress_bar.update(1)
-
         for h in handles:
             h.remove()
-
+            
+        if DEBUG:
+            print("Attention Pre Loss:", attentiongpt.pre_loss)
+        
         scalers = {}
         scalers.update(attentiongpt.scalers)
+
         mask_rebuild(args, attn_subset, ref_subset, scalers, prune_n=prune_n, prune_m=prune_m)
         attentiongpt.nsamples = 0
 
@@ -574,18 +569,19 @@ def prune_barber(args, dense_model, sparse_model, tokenizer, device=torch.device
         
         handles = []
         handles.append(sparse_layer.self_attn.register_forward_hook(self_attn()))
-        
         for j in range(args.nsamples):
             with torch.no_grad():
                 outs[j] = sparse_layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
-
         for h in handles:
             h.remove()
 
+        if DEBUG:
+            print(f"Attention Post Loss:",attentiongpt.post_loss)
+            
         attentiongpt.free()
         torch.cuda.empty_cache()
-
-        # MLP
+        
+        # mlp
         mlp = dense_layer.mlp
         mlp_subset = find_layers(mlp, name="mlp")
         mlpgpt = LlamaMLPGPT(mlp)
@@ -596,22 +592,24 @@ def prune_barber(args, dense_model, sparse_model, tokenizer, device=torch.device
                 mlpgpt.get_output(out[0].data)
                 mlpgpt.add_batch()
             return tmp
-
+        
         handles = []
         handles.append(sparse_layer.mlp.register_forward_hook(mlp()))
-
         for j in range(args.nsamples):
             temp = sparse_layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
             outs[j] = temp.clone().detach()
             del temp
             torch.cuda.empty_cache()
             progress_bar.update(1)
-
         for h in handles:
             h.remove()
 
+        if DEBUG:
+            print("MLP Pre Loss:", mlpgpt.pre_loss)
+
         scalers = {}
         scalers.update(mlpgpt.scalers)
+
         mask_rebuild(args, mlp_subset, ref_subset, scalers, prune_n=prune_n, prune_m=prune_m)
         mlpgpt.nsamples = 0
 
@@ -622,17 +620,18 @@ def prune_barber(args, dense_model, sparse_model, tokenizer, device=torch.device
         
         handles = []
         handles.append(sparse_layer.mlp.register_forward_hook(mlp()))
-        
         for j in range(args.nsamples):
             with torch.no_grad():
                 outs[j] = sparse_layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
-
         for h in handles:
             h.remove()
 
+        if DEBUG:
+            print(f"MLP Post Loss:", mlpgpt.post_loss)
+
         mlpgpt.free()
         torch.cuda.empty_cache()
-
+        
         del dense_layers[0]
         torch.cuda.empty_cache()
         inps, outs = outs, inps
