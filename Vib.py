@@ -24,9 +24,7 @@ class VIBMask(nn.Module):
         return mask
 
     def kl_loss(self):
-        return -0.5 * torch.mean(
-            1 + self.sigma - self.mu ** 2 - torch.exp(self.sigma)
-        )
+        return -0.5 * torch.mean(1 + self.sigma - self.mu**2 - torch.exp(self.sigma))
 
 # ------------------------------
 # LlamaAttention（支持 VIB 剪枝）
@@ -55,9 +53,10 @@ class LlamaAttention(nn.Module):
         key_states = self.k_proj(hidden_states).view(batch_size, seq_length, self.num_key_value_heads, self.head_dim)
         value_states = self.v_proj(hidden_states).view(batch_size, seq_length, self.num_key_value_heads, self.head_dim)
 
-        # VIB mask
+        # VIB masks
         mask_q = self.mask_q()
         query_states = query_states * mask_q
+
         mask_kv = self.mask_kv()
         key_states = key_states * mask_kv
         value_states = value_states * mask_kv
@@ -75,7 +74,7 @@ class LlamaAttention(nn.Module):
         attn_output = attn_output.view(batch_size, seq_length, self.hidden_size)
         attn_output = self.o_proj(attn_output)
 
-        return attn_output, self.mask_q.kl_loss() + self.mask_kv.kl_loss()
+        return attn_output, (self.mask_q.kl_loss() + self.mask_kv.kl_loss())
 
 # ------------------------------
 # LlamaMLP（支持 VIB 剪枝）
@@ -95,20 +94,19 @@ class LlamaMLP(nn.Module):
         self.mask_down = VIBMask(config.hidden_size, pruning_ratio)
 
     def forward(self, hidden_states):
+        # gate & up
         mask_gate = self.mask_gate()
         mask_up = self.mask_up()
 
-        hidden_states = F.silu(
-            self.gate_proj(hidden_states) * mask_gate
-        ) * (self.up_proj(hidden_states) * mask_up)
-
+        hidden_states = F.silu(self.gate_proj(hidden_states) * mask_gate) * (
+            self.up_proj(hidden_states) * mask_up
+        )
+        # down
         mask_down = self.mask_down()
         hidden_states = self.down_proj(hidden_states) * mask_down
 
         return hidden_states, (
-            self.mask_gate.kl_loss()
-            + self.mask_up.kl_loss()
-            + self.mask_down.kl_loss()
+            self.mask_gate.kl_loss() + self.mask_up.kl_loss() + self.mask_down.kl_loss()
         )
 
 # ------------------------------
@@ -135,58 +133,47 @@ class LlamaDecoderLayer(nn.Module):
         hidden_states, kl_mlp = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
 
-        return hidden_states, kl_attn + kl_mlp
+        return hidden_states, (kl_attn + kl_mlp)
 
 # ------------------------------
 # 自定义 forward：遍历 decoder 层并累加 KL 损失
 # ------------------------------
-def custom_llama_forward(self, input_ids, attention_mask=None, **kwargs):
+def custom_llama_forward(self, input_ids, attention_mask=None, position_ids=None, **kwargs):
     """
     覆盖模型的 forward，用于遍历 decoder 层并累加 VIB KL Loss。
-    另外，手动生成 position_ids，避免 NoneType 报错。
+    强制传入 position_ids，避免 NoneType 报错。
     """
-    batch_size, seq_length = input_ids.shape
-
-    # 🔑 这里手动生成 position_ids，避免 Llama 在内部因 NoneType 报错
-    if attention_mask is not None:
-        # 常见做法：对非 padding 位置计数
-        position_ids = attention_mask.long().cumsum(-1) - 1
-        position_ids.masked_fill_(attention_mask == 0, 0)
-    else:
-        position_ids = torch.arange(
-            seq_length, dtype=torch.long, device=input_ids.device
-        ).unsqueeze(0).expand(batch_size, -1)
-
+    # 这里旧版 llama 可能还会用到 position_ids，如果 None，会导致报错
+    # 如果你还要传其它参数，可以手动 pop
     hidden_states = self.embed_tokens(input_ids)
 
     kl_total = 0
     for layer in self.layers:
-        hidden_states, kl_loss = layer(hidden_states, attention_mask)
+        hidden_states, kl_loss = layer(hidden_states, attention_mask=attention_mask)
         kl_total += kl_loss
 
     hidden_states = self.norm(hidden_states)
-    # LlamaForCausalLM 可能需要返回 (hidden_states, kl_total)
+    # LlamaForCausalLM 需要返回 (hidden_states, kl_total)
     return hidden_states, kl_total
 
 def override_forward(model):
-    """
-    将自定义 forward 绑定到 model.model.forward，覆盖默认 Llama forward。
-    """
+    # 将自定义 forward 绑定到 model.model.forward，覆盖默认 Llama forward
     model.model.forward = custom_llama_forward.__get__(model.model, type(model.model))
 
 # ------------------------------
 # 替换预训练模型中每层的剪枝 Mask
 # ------------------------------
 def prune_llama_model(model, pruning_ratios):
+    # 对每层 attention 与 MLP 部分使用 VIBMask
     for i, layer in enumerate(model.model.layers):
-        pruning_ratio = pruning_ratios[i]
-        # 注意力部分
-        layer.self_attn.mask_q = VIBMask(layer.self_attn.num_heads, pruning_ratio)
-        layer.self_attn.mask_kv = VIBMask(layer.self_attn.num_key_value_heads, pruning_ratio)
-        # MLP部分
-        layer.mlp.mask_gate = VIBMask(layer.mlp.intermediate_size, pruning_ratio)
-        layer.mlp.mask_up = VIBMask(layer.mlp.intermediate_size, pruning_ratio)
-        layer.mlp.mask_down = VIBMask(layer.mlp.hidden_size, pruning_ratio)
+        pr = pruning_ratios[i]
+        # Attention
+        layer.self_attn.mask_q = VIBMask(layer.self_attn.num_heads, pr)
+        layer.self_attn.mask_kv = VIBMask(layer.self_attn.num_key_value_heads, pr)
+        # MLP
+        layer.mlp.mask_gate = VIBMask(layer.mlp.intermediate_size, pr)
+        layer.mlp.mask_up = VIBMask(layer.mlp.intermediate_size, pr)
+        layer.mlp.mask_down = VIBMask(layer.mlp.hidden_size, pr)
     return model
 
 # ------------------------------
@@ -195,6 +182,8 @@ def prune_llama_model(model, pruning_ratios):
 def get_dataloader():
     cache_dir = "/root/autodl-tmp"
     tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.1-8B", cache_dir=cache_dir)
+
+    # 如果模型没 pad_token，就把 eos 当 pad_token
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -208,8 +197,12 @@ def get_dataloader():
             max_length=512
         )
 
-    tokenized_dataset = dataset.map(tokenize_function, batched=True, remove_columns=["text"])
-    tokenized_dataset.set_format(type="torch", columns=["input_ids", "attention_mask"])
+    tokenized_dataset = dataset.map(
+        tokenize_function, batched=True, remove_columns=["text"]
+    )
+    tokenized_dataset.set_format(
+        type="torch", columns=["input_ids", "attention_mask"]
+    )
     return DataLoader(tokenized_dataset, batch_size=4, shuffle=True)
 
 # ------------------------------
@@ -232,35 +225,36 @@ def train_mask(model, dataloader, epochs=3, lr=1e-4):
     # 2. 只训练 VIBMask
     vib_params = [p for p in model.parameters() if p.requires_grad]
     if not vib_params:
-        raise ValueError(
-            "optimizer got an empty parameter list; check that VIBMask parameters are not frozen."
-        )
+        raise ValueError("optimizer got empty parameter list; check VIBMask freeze logic.")
 
     optimizer = torch.optim.AdamW(vib_params, lr=lr)
 
-    # 3. 用 accelerator.prepare(...) 管理多 GPU
+    # 3. 强制让 config.use_cache=False
+    model.config.use_cache = False  # 避免 Llama 内部 partial caching
+
+    # 用 accelerator.prepare(...) 管理多 GPU
     model, optimizer, dataloader = accelerator.prepare(model, optimizer, dataloader)
 
+    # 训练循环
     for epoch in range(epochs):
         model.train()
         total_kl_loss = 0
-
         for step, batch in enumerate(dataloader):
-            # 🔑 手动生成 position_ids，拼接到 batch 中
             input_ids = batch["input_ids"]
             attention_mask = batch["attention_mask"]
 
+            # 手动生成 position_ids 避免 None
+            # Common approach: cumsum for tokens != pad
             batch_size, seq_length = input_ids.shape
-
-            # 常见方法：对非 padding 位置计数
             position_ids = attention_mask.long().cumsum(-1) - 1
             position_ids.masked_fill_(attention_mask == 0, 0)
 
-            # 在 forward 时，会将它用于 Llama 内部
+            # 调用模型
             outputs = model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                position_ids=position_ids  # 传递 position_ids，避免 NoneType 报错
+                position_ids=position_ids,
+                use_cache=False  # 强制禁用 cache
             )
 
             # 自定义 forward 返回 (hidden_states, kl_loss)
@@ -274,31 +268,24 @@ def train_mask(model, dataloader, epochs=3, lr=1e-4):
             total_kl_loss += loss.item()
             if step % 50 == 0:
                 print(f"Epoch {epoch+1}, Step {step}, KL Loss: {loss.item()}")
-
         print(f"Epoch {epoch+1} finished, Avg KL Loss: {total_kl_loss / len(dataloader)}")
 
 if __name__ == "__main__":
     cache_dir = "/root/autodl-tmp/llm_weights"
-
     # 1. 加载模型
     model = AutoModelForCausalLM.from_pretrained(
         "meta-llama/Llama-3.1-8B",
         cache_dir=cache_dir,
         torch_dtype=torch.float16
     )
-
     # 2. 覆盖 forward
     override_forward(model)
-
-    # 3. 对每层应用剪枝
+    # 3. 按每层剪枝比例替换 Mask
     pruning_ratios = [0.7 * i for i in range(model.config.num_hidden_layers)]
     model = prune_llama_model(model, pruning_ratios)
-
-    # 4. 加载数据集
+    # 4. 加载数据
     dataloader = get_dataloader()
-
     # 5. 训练剪枝 Mask
     train_mask(model, dataloader)
-
-    # 6. 保存模型
+    # 6. 保存
     model.save_pretrained("/root/autodl-tmp/pruned_llama3_8b")
