@@ -5,34 +5,45 @@ from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from datasets import load_dataset
 import math
+from accelerate import Accelerator  # 确保已安装 accelerate
 
-# DummyRotaryEmbedding 仅作为占位符，建议用真实计算结果替换
+# ------------------------------
+# DummyRotaryEmbedding：用于替换原 rotary embedding，避免 NoneType 错误
+# ------------------------------
 class DummyRotaryEmbedding(nn.Module):
     def __init__(self, head_dim):
         super().__init__()
         self.head_dim = head_dim
+
     def forward(self, x, position_embeddings):
         batch_size, seq_len, _ = x.size()
+        # 返回全1和全0，使得旋转操作不改变输入
         cos = torch.ones(batch_size, seq_len, self.head_dim, device=x.device, dtype=x.dtype)
         sin = torch.zeros(batch_size, seq_len, self.head_dim, device=x.device, dtype=x.dtype)
         return cos, sin
 
-# VIBMask：用于剪枝的可训练 Mask
+# ------------------------------
+# VIBMask：可训练剪枝 Mask
+# ------------------------------
 class VIBMask(nn.Module):
     def __init__(self, size, pruning_ratio=0.5):
         super().__init__()
         self.mu = nn.Parameter(torch.zeros(size))
         self.sigma = nn.Parameter(torch.ones(size) * pruning_ratio)
+
     def forward(self, prev_mask=None):
         epsilon = torch.randn_like(self.sigma)
         mask = torch.sigmoid(self.mu + epsilon * self.sigma)
         if prev_mask is not None:
             mask = mask * prev_mask
         return mask
+
     def kl_loss(self):
         return -0.5 * torch.mean(1 + self.sigma - self.mu**2 - torch.exp(self.sigma))
 
+# ------------------------------
 # LlamaAttention（支持 VIB 剪枝）
+# ------------------------------
 class LlamaAttention(nn.Module):
     def __init__(self, config, pruning_ratio=0.5):
         super().__init__()
@@ -49,24 +60,22 @@ class LlamaAttention(nn.Module):
         self.mask_q = VIBMask(self.num_heads, pruning_ratio)
         self.mask_kv = VIBMask(self.num_key_value_heads, pruning_ratio)
 
-        # 在新版中，模型要求外部提供 position_embeddings，如果你有计算代码，请替换 DummyRotaryEmbedding
+        # 替换 rotary embedding
         self.rotary_emb = DummyRotaryEmbedding(self.head_dim)
 
     def forward(self, hidden_states, attention_mask=None, **kwargs):
         batch_size, seq_length, _ = hidden_states.shape
-
         query_states = self.q_proj(hidden_states).view(batch_size, seq_length, self.num_heads, self.head_dim)
         key_states = self.k_proj(hidden_states).view(batch_size, seq_length, self.num_key_value_heads, self.head_dim)
         value_states = self.v_proj(hidden_states).view(batch_size, seq_length, self.num_key_value_heads, self.head_dim)
 
         mask_q = self.mask_q()
         query_states = query_states * mask_q
-
         mask_kv = self.mask_kv()
         key_states = key_states * mask_kv
         value_states = value_states * mask_kv
 
-        # 这里调用 rotary_emb，传入 position_embeddings（如果有），否则使用 dummy 结果
+        # 位置编码：传入 dummy 的 position_embeddings
         if "position_embeddings" in kwargs:
             cos, sin = self.rotary_emb(query_states, kwargs["position_embeddings"])
         else:
@@ -82,7 +91,9 @@ class LlamaAttention(nn.Module):
 
         return attn_output, self.mask_q.kl_loss() + self.mask_kv.kl_loss()
 
+# ------------------------------
 # LlamaMLP（支持 VIB 剪枝）
+# ------------------------------
 class LlamaMLP(nn.Module):
     def __init__(self, config, pruning_ratio=0.5):
         super().__init__()
@@ -106,7 +117,9 @@ class LlamaMLP(nn.Module):
 
         return hidden_states, self.mask_gate.kl_loss() + self.mask_up.kl_loss() + self.mask_down.kl_loss()
 
-# LlamaDecoderLayer（支持剪枝）
+# ------------------------------
+# LlamaDecoderLayer（支持 VIB 剪枝）
+# ------------------------------
 class LlamaDecoderLayer(nn.Module):
     def __init__(self, config, layer_idx, pruning_ratio=0.5):
         super().__init__()
@@ -119,15 +132,15 @@ class LlamaDecoderLayer(nn.Module):
         hidden_states = self.norm_1(hidden_states)
         hidden_states, kl_attn = self.self_attn(hidden_states, attention_mask)
         hidden_states = residual + hidden_states
-
         residual = hidden_states
         hidden_states = self.norm_2(hidden_states)
         hidden_states, kl_mlp = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
-
         return hidden_states, kl_attn + kl_mlp
 
-# 自定义 forward，遍历 decoder 层并累加 KL 损失
+# ------------------------------
+# 自定义 forward：遍历 decoder 层并累加 KL 损失
+# ------------------------------
 def custom_llama_forward(self, input_ids, attention_mask=None, **kwargs):
     hidden_states = self.embed_tokens(input_ids)
     kl_total = 0
@@ -140,7 +153,9 @@ def custom_llama_forward(self, input_ids, attention_mask=None, **kwargs):
 def override_forward(model):
     model.model.forward = custom_llama_forward.__get__(model.model, type(model.model))
 
+# ------------------------------
 # 替换预训练模型中每层的剪枝 Mask
+# ------------------------------
 def prune_llama_model(model, pruning_ratios):
     for i, layer in enumerate(model.model.layers):
         pruning_ratio = pruning_ratios[i]
@@ -151,7 +166,9 @@ def prune_llama_model(model, pruning_ratios):
         layer.mlp.mask_down = VIBMask(layer.mlp.hidden_size, pruning_ratio)
     return model
 
+# ------------------------------
 # 加载数据集（使用 wikitext-2-raw-v1）
+# ------------------------------
 def get_dataloader():
     cache_dir = "/root/autodl-tmp"
     tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.1-8B", cache_dir=cache_dir)
@@ -164,13 +181,17 @@ def get_dataloader():
     tokenized_dataset.set_format(type="torch", columns=["input_ids", "attention_mask"])
     return DataLoader(tokenized_dataset, batch_size=4, shuffle=True)
 
+# ------------------------------
 # 冻结非 Mask 参数，仅训练 VIBMask 参数
+# ------------------------------
 def freeze_non_mask_params(model):
     for name, param in model.named_parameters():
         if "mask" not in name:
             param.requires_grad = False
 
-# 训练剪枝 Mask（使用 Accelerate 支持多 GPU）
+# ------------------------------
+# 训练剪枝 Mask（使用 Accelerate 管理多 GPU）
+# ------------------------------
 def train_mask(model, dataloader, epochs=3, lr=1e-4):
     accelerator = Accelerator()
     freeze_non_mask_params(model)
@@ -183,12 +204,13 @@ def train_mask(model, dataloader, epochs=3, lr=1e-4):
         model.train()
         total_kl_loss = 0
         for step, batch in enumerate(dataloader):
-            # 为保证位置编码正确，我们传入 dummy 的 position_embeddings
+            # 为保证新版要求，添加 dummy position_embeddings
             batch_size, seq_length = batch["input_ids"].shape
             head_dim = model.config.hidden_size // model.config.num_attention_heads
             dummy_cos = torch.ones(batch_size, seq_length, head_dim, device=batch["input_ids"].device, dtype=torch.float32)
             dummy_sin = torch.zeros(batch_size, seq_length, head_dim, device=batch["input_ids"].device, dtype=torch.float32)
             batch["position_embeddings"] = (dummy_cos, dummy_sin)
+
             outputs = model(**batch)
             _, kl_loss = outputs  # custom forward 返回 (hidden_states, kl_total)
             loss = kl_loss
@@ -202,14 +224,12 @@ def train_mask(model, dataloader, epochs=3, lr=1e-4):
 
 if __name__ == "__main__":
     cache_dir = "/root/autodl-tmp/llm_weights"
-    # 不使用 device_map，让 Accelerate 管理多 GPU
     model = AutoModelForCausalLM.from_pretrained(
         "meta-llama/Llama-3.1-8B",
         cache_dir=cache_dir,
         torch_dtype=torch.float16
     )
     override_forward(model)
-    # 生成每层剪枝比例，例如每层比例不同
     pruning_ratios = [0.7 * i for i in range(model.config.num_hidden_layers)]
     model = prune_llama_model(model, pruning_ratios)
     dataloader = get_dataloader()
