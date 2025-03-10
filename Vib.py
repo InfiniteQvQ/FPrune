@@ -139,7 +139,8 @@ def train_mask(model, dataloader, epochs=3, lr=1e-4):
 
 if __name__ == "__main__":
     # 🚀 加载 Llama3
-    model = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-3.1-8B", device_map="auto", torch_dtype=torch.float16)
+    cache_dir = "/root/autodl-tmp/llm_weights"
+    model = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-3.1-8B", cache_dir=cache_dir,device_map="auto", torch_dtype=torch.float16)
 
     # 🚀 设置剪枝比例
     pruning_ratios = [0.7 * i for i in range(32)]
