@@ -9,8 +9,76 @@ from .blockgpt import LlamaAttentionGPT, LlamaMLPGPT
 from .data import get_loaders 
 import matplotlib.pyplot as plt
 import os
+import numpy as np
 
 DEBUG = False
+
+class WrappedGPT:
+    """
+    This class wraps a GPT layer for specific operations.
+    """
+
+    def __init__(self, layer, layer_id=0, layer_name="none"):
+        self.layer = layer
+        self.dev = self.layer.weight.device
+        self.rows = layer.weight.data.shape[0]
+        self.columns = layer.weight.data.shape[1]
+
+        self.scaler_row = torch.zeros((self.columns), device=self.dev)
+        self.nsamples = 0
+
+        self.layer_id = layer_id 
+        self.layer_name = layer_name
+
+    def add_batch(self, inp, out):
+        if len(inp.shape) == 2:
+            inp = inp.unsqueeze(0)
+        tmp = inp.shape[0]
+        if isinstance(self.layer, nn.Linear):
+            if len(inp.shape) == 3:
+                inp = inp.reshape((-1, inp.shape[-1]))
+            inp = inp.t()
+
+        self.scaler_row *= self.nsamples / (self.nsamples+tmp)
+        self.nsamples += tmp
+
+        inp = inp.type(torch.float32)
+        self.scaler_row += torch.norm(inp, p=2, dim=1) ** 2  / self.nsamples
+
+def prepare_calibration_input_opt(model, dataloader, device):
+    layers = model.model.decoder.layers
+    
+    if "model.embed_tokens" in model.hf_device_map:
+        device = model.hf_device_map["model.embed_tokens"]
+
+    dtype = next(iter(model.parameters())).dtype
+    inps = torch.zeros((128, model.seqlen, model.config.hidden_size), dtype=dtype, device=device)
+    inps.requires_grad = False
+    cache = {'i': 0, 'attention_mask': None}
+    
+    class Catcher(nn.Module):
+        def __init__(self, module):
+            super().__init__()
+            self.module = module
+        def forward(self, inp, **kwargs):
+            inps[cache['i']] = inp
+            cache['i'] += 1
+            cache['attention_mask'] = kwargs['attention_mask']
+            raise ValueError
+        
+    layers[0] = Catcher(layers[0])
+    for batch in dataloader:
+        try:
+            model(batch[0].to(device))
+        except ValueError:
+            pass 
+        
+    layers[0] = layers[0].module
+    torch.cuda.empty_cache()
+    outs = torch.zeros_like(inps)
+    attention_mask = cache['attention_mask']
+
+    return inps, outs, attention_mask, None
 
 def find_layers(module, layers=[nn.Linear], name=''):
     """
@@ -196,7 +264,19 @@ def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0
     end_time = time.time()
     print(f"Execution time: {end_time - start_time} seconds")
 
-def prune_wandd(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, prune_m=0):
+def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, prune_m=0, ratios=None):
+    res = [0.5704216361045837, 0.6175978779792786, 0.6315311193466187, 0.6307380199432373, 0.6528562903404236, 
+            0.648245096206665, 0.6300591230392456, 0.5921671986579895, 0.5973896384239197, 0.5680346488952637, 
+            0.5870822668075562, 0.5893719792366028, 0.5989924073219299, 0.610863208770752, 0.618774950504303, 
+            0.6681280136108398, 0.6586800217628479, 0.7156056761741638, 0.790572464466095, 0.7437890768051147, 
+            0.794614851474762, 0.8248370885848999, 0.7700518369674683, 0.7629246115684509, 0.8121660351753235, 
+            0.8520520329475403, 0.831261396408081, 0.8414707183837891, 0.7869208455085754, 0.8296730518341064, 
+            0.8414230942726135, 0.7317030429840088]
+    r = []
+    for i in res:
+        for j in range(7):
+            r.append(i)
+    ratios = np.array(r)
     use_cache = model.config.use_cache 
     model.config.use_cache = False 
 
@@ -204,20 +284,38 @@ def prune_wandd(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0
     dataloader, _ = get_loaders("c4",nsamples=args.nsamples,seed=args.seed,seqlen=model.seqlen,tokenizer=tokenizer)
     print("dataset loading complete")
     with torch.no_grad():
-        inps, outs, attention_mask, position_ids = prepare_calibration_input(model, dataloader, args.nsamples, device)
+        if "OPT" in model.__class__.__name__:
+            inps, outs, attention_mask, position_ids = prepare_calibration_input_opt(model, dataloader, device)
+        else:
+            inps, outs, attention_mask, position_ids = prepare_calibration_input(model, dataloader, device)
+
+
+    print ("inps",inps)
+
+    if "OPT" in model.__class__.__name__:
+        layers = model.model.decoder.layers
+    else:    
+        layers = model.model.layers
     
-    layers = model.model.layers
+    layer_num = len(find_layers(layers))
+    if ratios is None:
+        ratios = [args.sparsity_ratio for i in range(layer_num)]
+    
+    k=0
     for i in range(len(layers)):
         layer = layers[i]
         subset = find_layers(layer)
 
         if f"model.layers.{i}" in model.hf_device_map:   ## handle the case for llama-30B and llama-65B, when the device map has multiple GPUs;
             dev = model.hf_device_map[f"model.layers.{i}"]
+            print("using wanda!")
+            dev = model.hf_device_map[f"model.layers.{i}"]
+            print(f"layer {i} device {dev}")
             inps, outs, attention_mask, position_ids = inps.to(dev), outs.to(dev), attention_mask.to(dev), position_ids.to(dev)
 
         wrapped_layers = {}
         for name in subset:
-            wrapped_layers[name] = UWrappedGPT(subset[name])
+            wrapped_layers[name] = WrappedGPT(subset[name])
 
         def add_batch(name):
             def tmp(_, inp, out):
@@ -229,16 +327,18 @@ def prune_wandd(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0
             handles.append(subset[name].register_forward_hook(add_batch(name)))
         for j in range(args.nsamples):
             with torch.no_grad():
-                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+                if "OPT" in model.__class__.__name__:
+                    outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask)[0]
+                else:
+                    
+                    outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
         for h in handles:
             h.remove()
 
         for name in subset:
             print(f"pruning layer {i} name {name}")
-            print(subset[name].weight)
-            print(wrapped_layers[name].scaler)
-            W_metric = torch.abs(subset[name].weight.data) * torch.sqrt(wrapped_layers[name].scaler)
-            print(W_metric)
+            W_metric = torch.abs(subset[name].weight.data) * torch.sqrt(wrapped_layers[name].scaler_row.reshape((1,-1)))
+
             W_mask = (torch.zeros_like(W_metric) == 1)  ## initialize a mask to be all False
             if prune_n != 0:
                 # structured n:m sparsity
@@ -270,14 +370,18 @@ def prune_wandd(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0
                     print(f"alpha found {alpha} sparsity {cur_sparsity:.6f}")
                 else:
                     # unstructured pruning
-                    indices = sort_res[1][:,:int(W_metric.shape[1]*args.sparsity_ratio)]
+                    indices = sort_res[1][:,:int(W_metric.shape[1]*ratios[k])]
+                    k+=1
                     W_mask.scatter_(1, indices, True)
-
+#             print ("W_mask",W_mask)
             subset[name].weight.data[W_mask] = 0  ## set weights to zero 
 
         for j in range(args.nsamples):
             with torch.no_grad():
-                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+                if "OPT" in model.__class__.__name__:
+                    outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask)[0]
+                else:
+                    outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
         inps, outs = outs, inps
 
     model.config.use_cache = use_cache 
