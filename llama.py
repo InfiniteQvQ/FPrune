@@ -51,7 +51,7 @@ def prepare_calibration_input_opt(model, dataloader, device):
         device = model.hf_device_map["model.embed_tokens"]
 
     dtype = next(iter(model.parameters())).dtype
-    inps = torch.zeros((128, model.seqlen, model.config.hidden_size), dtype=dtype, device=device)
+    inps = torch.zeros((16, model.seqlen, model.config.hidden_size), dtype=dtype, device=device)
     inps.requires_grad = False
     cache = {'i': 0, 'attention_mask': None}
     
@@ -195,7 +195,7 @@ def prune_magnitude(args, model, tokenizer, device=torch.device("cuda:0"), prune
             W[W_mask] = 0
 
 def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, prune_m=0, ratios=None):
-    res = [0.5704213976860046, 0.6175976395606995, 0.6315308809280396, 0.6307377219200134, 0.6081505119800568, 0.6081505119800568, 0.6081505119800568, 0.6081505119800568, 0.6081505119800568, 0.6081505119800568, 0.6081505119800568, 0.6081505119800568, 0.6095432837804159, 0.6095432837804159, 0.6095432837804159, 0.6808042724927267, 0.6808042724927267, 0.6808042724927267, 0.7763251463572184, 0.7763251463572184, 0.7763251463572184, 0.785937507947286, 0.785937507947286, 0.785937507947286, 0.8321086764335632, 0.8321086764335632, 0.8363656997680664, 0.8363656997680664, 0.8082965910434723, 0.8082965910434723, 0.8414227962493896, 0.7317027449607849]
+    res = [0.5293006074418442, 0.6358363452242717, 0.7748192144399018, 0.7234297956976186, 0.705076419482818, 0.7139799622267773, 0.747167659368869, 0.5980377426491537, 0.5390139233026938, 0.5062957468510644, 0.5670330803422492, 0.5246790027265411, 0.5556295724845334, 0.5940288875974529, 0.5995001962463322, 0.672528180351988, 0.7913333400142103, 0.7112298065103565, 0.6983272207225116, 0.7847523906736767, 0.7486794849375509, 0.7650636317350729, 0.8405095219304548, 0.8392653829077255, 0.8146051974336859, 0.7603679049430712, 0.7766239792175328, 0.8103622440266844, 0.9402635298662624, 0.7872863009674198, 0.6663283535177681, 0.6786439656583021]
     r = []
     for i in res:
         for j in range(7):
@@ -211,7 +211,7 @@ def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0
         if "OPT" in model.__class__.__name__:
             inps, outs, attention_mask, position_ids = prepare_calibration_input_opt(model, dataloader, device)
         else:
-            inps, outs, attention_mask, position_ids = prepare_calibration_input(model, dataloader, 64, device)
+            inps, outs, attention_mask, position_ids = prepare_calibration_input(model, dataloader, 16, device)
 
 
     print ("inps",inps)
