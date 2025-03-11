@@ -43,7 +43,7 @@ class WrappedGPT:
 
         inp = inp.type(torch.float32)
         self.scaler_row += torch.norm(inp, p=2, dim=1) ** 2  / self.nsamples
-        
+
 def prepare_calibration_input_opt(model, dataloader, device):
     layers = model.model.decoder.layers
     
@@ -126,16 +126,15 @@ def check_sparsity(model):
     model.config.use_cache = use_cache 
     return float(count)/total_params 
 
-def prepare_calibration_input(model, dataloader, nsample, device):
-    use_cache = model.config.use_cache
-    model.config.use_cache = False
+def prepare_calibration_input(model, dataloader, device):
     layers = model.model.layers
 
+    # dev = model.hf_device_map["model.embed_tokens"]
     if "model.embed_tokens" in model.hf_device_map:
         device = model.hf_device_map["model.embed_tokens"]
 
     dtype = next(iter(model.parameters())).dtype
-    inps = torch.zeros((nsample, model.seqlen, model.config.hidden_size), dtype=dtype, device=device)
+    inps = torch.zeros((128, model.seqlen, model.config.hidden_size), dtype=dtype, device=device)
     inps.requires_grad = False
     cache = {'i': 0, 'attention_mask': None, "position_ids": None}
 
@@ -155,14 +154,14 @@ def prepare_calibration_input(model, dataloader, nsample, device):
             model(batch[0].to(device))
         except ValueError:
             pass 
-    layers[0] = layers[0].module
 
+    layers[0] = layers[0].module
+    torch.cuda.empty_cache()
     outs = torch.zeros_like(inps)
     attention_mask = cache['attention_mask']
     position_ids = cache['position_ids']
-    model.config.use_cache = use_cache
 
-    return inps, outs, attention_mask, position_ids 
+    return inps, outs, attention_mask, position_ids
 
 def return_given_alpha(alpha, sort_res, W_metric, tmp_metric, sum_before):
     thres_cumsum = sum_before * alpha 
@@ -209,7 +208,7 @@ def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0
     ratios = np.array(r)
     use_cache = model.config.use_cache 
     model.config.use_cache = False 
-
+    
     print("loading calibdation data")
     dataloader, _ = get_loaders("c4",nsamples=args.nsamples,seed=args.seed,seqlen=model.seqlen,tokenizer=tokenizer)
     print("dataset loading complete")
