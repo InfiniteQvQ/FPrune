@@ -960,7 +960,7 @@ def ww_sparsity_llama_7b(args, model, device=torch.device("cuda:0"),
 def ww_sparsity_test_3b(args, model, device=torch.device("cuda:0"),
                          s1=0.8, s2=1.2, ratios=None, prune_n=0, prune_m=0,
                          weight_esd=0.8, eps=1e-8):
-    c = [0.7] * 32
+    c = [0.5] * 32
     a = []
     for i in c:
         for j in range(7):
