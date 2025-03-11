@@ -126,15 +126,16 @@ def check_sparsity(model):
     model.config.use_cache = use_cache 
     return float(count)/total_params 
 
-def prepare_calibration_input(model, dataloader, device):
+def prepare_calibration_input(model, dataloader, nsample, device):
+    use_cache = model.config.use_cache
+    model.config.use_cache = False
     layers = model.model.layers
 
-    # dev = model.hf_device_map["model.embed_tokens"]
     if "model.embed_tokens" in model.hf_device_map:
         device = model.hf_device_map["model.embed_tokens"]
 
     dtype = next(iter(model.parameters())).dtype
-    inps = torch.zeros((128, model.seqlen, model.config.hidden_size), dtype=dtype, device=device)
+    inps = torch.zeros((nsample, model.seqlen, model.config.hidden_size), dtype=dtype, device=device)
     inps.requires_grad = False
     cache = {'i': 0, 'attention_mask': None, "position_ids": None}
 
@@ -154,14 +155,14 @@ def prepare_calibration_input(model, dataloader, device):
             model(batch[0].to(device))
         except ValueError:
             pass 
-
     layers[0] = layers[0].module
-    torch.cuda.empty_cache()
+
     outs = torch.zeros_like(inps)
     attention_mask = cache['attention_mask']
     position_ids = cache['position_ids']
+    model.config.use_cache = use_cache
 
-    return inps, outs, attention_mask, position_ids
+    return inps, outs, attention_mask, position_ids 
 
 def return_given_alpha(alpha, sort_res, W_metric, tmp_metric, sum_before):
     thres_cumsum = sum_before * alpha 
@@ -216,7 +217,7 @@ def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0
         if "OPT" in model.__class__.__name__:
             inps, outs, attention_mask, position_ids = prepare_calibration_input_opt(model, dataloader, device)
         else:
-            inps, outs, attention_mask, position_ids = prepare_calibration_input(model, dataloader, device)
+            inps, outs, attention_mask, position_ids = prepare_calibration_input(model, dataloader, 64, device)
 
 
     print ("inps",inps)
@@ -278,9 +279,7 @@ def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0
             else:
                 sort_res = torch.sort(W_metric, dim=-1, stable=True)
 
-                
-               
-                # unstructured pruning
+            
                 indices = sort_res[1][:,:int(W_metric.shape[1]*ratios[k])]
                 k+=1
                 W_mask.scatter_(1, indices, True)
