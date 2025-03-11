@@ -19,7 +19,7 @@ min_score = torch.min(scores)
 layerwise_pruning_ratios_esd = (((scores - min_score) / (max_score - min_score + eps)) * (s2 - s1) + s1)
     # 校正以满足整体稀疏率要求
 
-layerwise_pruning_ratios_esd = layerwise_pruning_ratios_esd * 0.5
+layerwise_pruning_ratios_esd = layerwise_pruning_ratios_esd * 0.5071735
 layerwise_pruning_ratios_esd = layerwise_pruning_ratios_esd.cpu().numpy().tolist()
 print("ESD-based ratios:", layerwise_pruning_ratios_esd)
 
@@ -60,7 +60,10 @@ for seg, l in segments.items():
             res.append(cur)
 
 b  = []
+sum = 0
 for i in range(32):
     b.append(res[i*7])
+    sum += b[-1]
 
 print(b)
+print("mean: ", sum/(32))
