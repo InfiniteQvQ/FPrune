@@ -58,7 +58,7 @@ def process_layer(layer_idx, layer):
     output_svd = singular_value_spectrum(output_proj)  # ✅ SVD 衡量
 
     # 📊 计算相对重要性
-    layer_relative_importance = attn_svd * 0.3 + (1 / mlp_esd) * 0.7 + output_svd * 0.3  # 归一化权重计算
+    layer_relative_importance = attn_svd * 0.1 + (1 / mlp_esd) * 0.9 + output_svd * 0.1  # 归一化权重计算
 
     # 🚀 释放显存
     del q_proj, k_proj, v_proj, gate_proj, up_proj, down_proj, output_proj
