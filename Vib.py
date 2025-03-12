@@ -19,19 +19,26 @@ class VIBLayer(nn.Module):
         super().__init__()
         self.mu = nn.Parameter(torch.randn(input_dim) * 0.01)
         self.log_sigma = nn.Parameter(torch.randn(input_dim) * 0.01)
-        self.target_sparsity = target_sparsity
+        self.target_sparsity = target_sparsity  # 目标剪枝率
 
     def forward(self, x):
+        """
+        x: (batch_size, seq_len, hidden_dim)
+        """
         std = torch.exp(0.5 * self.log_sigma)
         eps = torch.randn_like(std)
         z = self.mu + eps * std
-        mask = torch.sigmoid(z)  # 生成 soft mask
+        mask = torch.sigmoid(z)
 
-        # 计算阈值，使剪枝率符合 target_sparsity
+        # 确保 mask 维度匹配
         sorted_mask, _ = torch.sort(mask)
         threshold = sorted_mask[int(len(mask) * self.target_sparsity)]
         final_mask = (mask > threshold).float()
-        return x * final_mask, mask  # 返回剪枝后的张量 & 原始 mask
+
+        # ✅ 这里做形状匹配
+        final_mask = final_mask.view(1, 1, -1)  # (1, 1, hidden_dim) 适用于 (batch, seq, hidden_dim)
+
+        return x * final_mask, mask  # 剪枝后的张量 & 原始 mask
 
 
 # ✅ 重新封装 LLaMA，添加 **每层独立** 的 VIB 层
