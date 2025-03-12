@@ -10,10 +10,7 @@ from datasets import load_dataset
 import os
 
 # ✅ 每层的剪枝率
-TARGET_SPARSITY_PER_LAYER = [
-    0.3, 0.5, 0.6, 0.4, 0.7, 0.5, 0.6, 0.8, 0.5, 0.4, 0.3, 0.5, 0.7, 0.6, 0.8, 0.4,
-    0.5, 0.6, 0.7, 0.8, 0.5, 0.4, 0.6, 0.7, 0.5, 0.3, 0.8, 0.7, 0.6, 0.5, 0.9
-] * 7  # 32 层，每层不同剪枝率
+TARGET_SPARSITY_PER_LAYER = [0.7] * 7 * 32
 
 
 # ✅ Variational Information Bottleneck (VIB) Mask 层
@@ -74,7 +71,6 @@ def kl_loss(mu, log_sigma):
     return -0.5 * torch.sum(1 + log_sigma - mu.pow(2) - log_sigma.exp())
 
 
-# ✅ 训练函数（多卡支持）
 def train_mask(rank, world_size):
     # 1️⃣ 初始化分布式训练
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
@@ -84,39 +80,42 @@ def train_mask(rank, world_size):
     model_name = "pinkmanlove/llama-7b-hf"
     tokenizer = AutoTokenizer.from_pretrained("HuggingFaceM4/llama-7b-tokenizer")
     cache_dir = "/root/autodl-tmp/llm_weights"
+    
+    # ✅ 让 Hugging Face 处理 GPU 分配，避免 OOM
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         cache_dir=cache_dir,
-        torch_dtype=torch.float16
-    ).to(rank)
+        torch_dtype=torch.float16,
+        device_map="auto"  # ✅ 让 Hugging Face 自动分配 GPU
+    )
 
     print(f"🔥 Model has {len(model.model.layers)} layers")
     print(f"🔥 Target sparsity list has {len(TARGET_SPARSITY_PER_LAYER)} values")
+    assert len(TARGET_SPARSITY_PER_LAYER) == len(model.model.layers), "❌ Sparsity list does not match model layers!"
 
-    # 3️⃣ 初始化剪枝模型（多卡模式）
+    # 3️⃣ 初始化剪枝模型（不再使用 DDP）
     pruned_model = PrunedLlama(model, TARGET_SPARSITY_PER_LAYER).to(rank)
-    pruned_model = DDP(pruned_model, device_ids=[rank], output_device=rank)
 
-    # 4️⃣ 加载训练数据
-    dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
-    train_texts = dataset["text"]
-    train_tokens = tokenizer(train_texts, return_tensors="pt", padding=True, truncation=True, max_length=512)
-
-    train_sampler = DistributedSampler(train_tokens["input_ids"], num_replicas=world_size, rank=rank, shuffle=True)
-    train_loader = DataLoader(train_tokens["input_ids"], batch_size=4, sampler=train_sampler)
-
-    # 5️⃣ 训练 Mask
+    # 4️⃣ 训练
     optimizer = optim.Adam(pruned_model.parameters(), lr=5e-4)
     beta = 1e-5
 
+    dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
+    train_texts = dataset["text"]
+    train_tokens = tokenizer(train_texts, return_tensors="pt", padding=True, truncation=True, max_length=512)
+    train_loader = DataLoader(train_tokens["input_ids"], batch_size=4, shuffle=True)
+
     for epoch in range(5):  # 训练 5 轮
-        train_sampler.set_epoch(epoch)  # 设置采样器的 epoch，保证多卡同步
         total_loss = 0
         for inputs in train_loader:
             inputs = inputs.to(rank)
 
             optimizer.zero_grad()
-            outputs, kl_losses = pruned_model(inputs)  # 计算 KL Loss
+            outputs = pruned_model(inputs)
+
+            # 计算 KL 损失
+            kl_losses = sum(kl_loss(layer.mu, layer.log_sigma) for layer in pruned_model.mlp_vib_layers)
+            kl_losses += sum(kl_loss(layer.mu, layer.log_sigma) for layer in pruned_model.attn_vib_layers)
 
             loss = outputs.loss + beta * kl_losses
             loss.backward()
@@ -126,13 +125,14 @@ def train_mask(rank, world_size):
 
         print(f"[GPU {rank}] Epoch {epoch + 1}, Loss: {total_loss:.4f}")
 
-    # 6️⃣ 保存 Mask（只在主进程保存）
+    # 6️⃣ 仅在主进程保存 Mask
     if rank == 0:
-        torch.save(pruned_model.module.state_dict(), "pruned_llama7b.pth")
+        torch.save(pruned_model.state_dict(), "pruned_llama7b.pth")
         print("[GPU 0] 🎯 Mask 已保存！")
 
     # 7️⃣ 关闭进程组
     dist.destroy_process_group()
+
 
 
 # ✅ 运行分布式训练
