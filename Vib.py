@@ -1,153 +1,177 @@
+import os
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer
-import torch.distributed as dist
-import torch.multiprocessing as mp
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader, DistributedSampler
 from datasets import load_dataset
-import os
 
-# ✅ 每层的剪枝率
-TARGET_SPARSITY_PER_LAYER = [0.7] * 7 * 32
+# -------------------------
+# 全局参数设置
+# -------------------------
+# 假设 LLaMA-7B 模型有 32 层（实际层数请根据模型检查），这里每层的目标剪枝率设为 0.7（即剪掉 70%）
+TARGET_SPARSITY_PER_LAYER = [0.7] * 32
 
+BETA = 1e-5              # KL 正则项权重
+NUM_EPOCHS = 5
+BATCH_SIZE = 4
+LEARNING_RATE = 5e-4
+MAX_SEQ_LENGTH = 512
 
-# ✅ Variational Information Bottleneck (VIB) Mask 层
+# -------------------------
+# 定义 VIB 模块
+# -------------------------
 class VIBLayer(nn.Module):
     def __init__(self, input_dim, target_sparsity):
+        """
+        input_dim: 待剪枝向量的维度（例如 mlp.down_proj.weight 的行数或 attn.o_proj.weight 的行数）
+        target_sparsity: 目标剪枝率（例如 0.7 表示剪掉 70% 的权重）
+        """
         super().__init__()
         self.mu = nn.Parameter(torch.randn(input_dim) * 0.01)
         self.log_sigma = nn.Parameter(torch.randn(input_dim) * 0.01)
-        self.target_sparsity = target_sparsity  # 目标剪枝率
+        self.target_sparsity = target_sparsity
 
     def forward(self, x):
         """
         x: (batch_size, seq_len, hidden_dim)
+        对 x 的最后一维施加一个 mask
         """
         std = torch.exp(0.5 * self.log_sigma)
         eps = torch.randn_like(std)
         z = self.mu + eps * std
-        mask = torch.sigmoid(z)
+        mask_prob = torch.sigmoid(z)
+        # 根据排序得到阈值，使得大约 target_sparsity 的比例置 0
+        sorted_mask, _ = torch.sort(mask_prob.view(-1))
+        cutoff_index = int(len(sorted_mask) * self.target_sparsity)
+        threshold = sorted_mask[cutoff_index]
+        final_mask = (mask_prob > threshold).float()
+        # 将 mask 扩展为 (1, 1, hidden_dim)，便于广播
+        final_mask = final_mask.view(1, 1, -1)
+        return x * final_mask, mask_prob
 
-        # 确保 mask 维度匹配
-        sorted_mask, _ = torch.sort(mask)
-        threshold = sorted_mask[int(len(mask) * self.target_sparsity)]
-        final_mask = (mask > threshold).float()
-
-        # ✅ 这里做形状匹配
-        final_mask = final_mask.view(1, 1, -1)  # (1, 1, hidden_dim) 适用于 (batch, seq, hidden_dim)
-
-        return x * final_mask, mask  # 剪枝后的张量 & 原始 mask
-
-
-# ✅ 重新封装 LLaMA，添加 **每层独立** 的 VIB 层
-class PrunedLlama(nn.Module):
-    def __init__(self, model, target_sparsity_per_layer):
+# -------------------------
+# 定义封装后的 Pruned LLaMA 模型（多 GPU 使用 DataParallel）
+# -------------------------
+class PrunedLlamaForCausalLM(nn.Module):
+    def __init__(self, orig_model, target_sparsity_per_layer):
+        """
+        orig_model: 原始由 Hugging Face 加载的 AutoModelForCausalLM 模型
+        target_sparsity_per_layer: 长度与模型层数相同的列表，表示每一层的目标剪枝率
+        """
         super().__init__()
-        self.model = model
-        self.num_layers = len(model.model.layers)
-
-        # 为每一层的 MLP 和 Attention 创建独立的 Mask
+        self.orig_model = orig_model  # 包含 model.model.layers、lm_head、norm、embed_tokens 等
+        self.num_layers = len(orig_model.model.layers)
+        # 为每一层创建两个 VIB 层（分别作用于 MLP 和 Attention 的输出）
         self.mlp_vib_layers = nn.ModuleList([
-            VIBLayer(model.model.layers[i].mlp.down_proj.weight.shape[0], target_sparsity_per_layer[i])
+            VIBLayer(orig_model.model.layers[i].mlp.down_proj.weight.shape[0],
+                     target_sparsity_per_layer[i])
             for i in range(self.num_layers)
         ])
-
         self.attn_vib_layers = nn.ModuleList([
-            VIBLayer(model.model.layers[i].self_attn.o_proj.weight.shape[0], target_sparsity_per_layer[i])
+            VIBLayer(orig_model.model.layers[i].self_attn.o_proj.weight.shape[0],
+                     target_sparsity_per_layer[i])
             for i in range(self.num_layers)
         ])
 
-    def forward(self, x):
-        kl_total = 0  # 统计 KL Loss
-        for i, layer in enumerate(self.model.model.layers):
-            x, mask_mlp = self.mlp_vib_layers[i](x)  # ✅ 确保 mask 形状正确
-            x, mask_attn = self.attn_vib_layers[i](x)
-            x = layer(x)  # 进入 LLaMA 原始结构
+    def forward(self, input_ids, attention_mask, labels=None):
+        # 获取输入 embedding
+        inputs_embeds = self.orig_model.model.embed_tokens(input_ids)
+        x = inputs_embeds
 
-            # 计算 KL 损失
+        kl_total = 0.0  # 累计所有 VIB 层的 KL 损失
+        # 遍历每一层，先对输入施加 MLP 与 Attention 的 VIB mask，再调用原始 LLaMA 层
+        for i, layer in enumerate(self.orig_model.model.layers):
+            x, _ = self.mlp_vib_layers[i](x)
+            x, _ = self.attn_vib_layers[i](x)
+            layer_outputs = layer(
+                x,
+                attention_mask=attention_mask,
+                position_ids=None,
+                past_key_value=None,
+                output_attentions=False,
+                use_cache=False,
+                hidden_mask=None
+            )
+            x = layer_outputs[0]
             kl_total += kl_loss(self.mlp_vib_layers[i].mu, self.mlp_vib_layers[i].log_sigma)
             kl_total += kl_loss(self.attn_vib_layers[i].mu, self.attn_vib_layers[i].log_sigma)
 
-        return x, kl_total
+        # 经过最后的归一化层与 lm_head 得到 logits
+        if self.orig_model.model.norm is not None:
+            x = self.orig_model.model.norm(x)
+        logits = self.orig_model.lm_head(x)
 
+        loss = None
+        if labels is not None:
+            # 右移计算交叉熵损失
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            loss_fct = nn.CrossEntropyLoss()
+            loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+        return {"loss": loss, "logits": logits, "kl_loss": kl_total}
 
-# ✅ KL 约束 Loss
+# KL 损失函数
 def kl_loss(mu, log_sigma):
     return -0.5 * torch.sum(1 + log_sigma - mu.pow(2) - log_sigma.exp())
 
+# -------------------------
+# 训练代码（多 GPU DataParallel 版）
+# -------------------------
+def train_vib_mask():
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-def train_mask(rank, world_size):
-    # 1️⃣ 初始化分布式训练
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
-    torch.cuda.set_device(rank)
-
-    # 2️⃣ 加载 LLaMA 模型
+    # 1. 加载原始模型和 tokenizer
     model_name = "pinkmanlove/llama-7b-hf"
     tokenizer = AutoTokenizer.from_pretrained("HuggingFaceM4/llama-7b-tokenizer")
-    cache_dir = "/root/autodl-tmp/llm_weights"
-    
-    # ✅ 让 Hugging Face 处理 GPU 分配，避免 OOM
-    model = AutoModelForCausalLM.from_pretrained(
+    cache_dir = "/root/autodl-tmp/llm_weights"  # 根据实际情况设置
+
+    orig_model = AutoModelForCausalLM.from_pretrained(
         model_name,
         cache_dir=cache_dir,
         torch_dtype=torch.float16,
-        device_map="auto"  # ✅ 让 Hugging Face 自动分配 GPU
+        device_map="auto"
     )
+    orig_model.to(device)
+    print(f"原始模型层数: {len(orig_model.model.layers)}")
+    print(f"目标剪枝率列表长度: {len(TARGET_SPARSITY_PER_LAYER)}")
 
-    print(f"🔥 Model has {len(model.model.layers)} layers")
-    print(f"🔥 Target sparsity list has {len(TARGET_SPARSITY_PER_LAYER)} values")
+    # 2. 封装模型，加入每层独立的 VIB Mask，并用 DataParallel 包装
+    pruned_model = PrunedLlamaForCausalLM(orig_model, TARGET_SPARSITY_PER_LAYER)
+    pruned_model = nn.DataParallel(pruned_model)
+    pruned_model.to(device)
+    pruned_model.train()
 
-    # 3️⃣ 初始化剪枝模型（不再使用 DDP）
-    pruned_model = PrunedLlama(model, TARGET_SPARSITY_PER_LAYER).to(rank)
+    optimizer = optim.Adam(pruned_model.parameters(), lr=LEARNING_RATE)
 
-    # 4️⃣ 训练
-    optimizer = optim.Adam(pruned_model.parameters(), lr=5e-4)
-    beta = 1e-5
-
+    # 3. 加载数据集
     dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
-    train_texts = dataset["text"]
-    train_tokens = tokenizer(train_texts, return_tensors="pt", padding=True, truncation=True, max_length=512)
-    train_loader = DataLoader(train_tokens["input_ids"], batch_size=4, shuffle=True)
+    texts = dataset["text"]
+    tokenized = tokenizer(texts, return_tensors="pt", padding=True, truncation=True, max_length=MAX_SEQ_LENGTH)
+    input_ids = tokenized["input_ids"]
 
-    for epoch in range(5):  # 训练 5 轮
-        total_loss = 0
-        for inputs in train_loader:
-            inputs = inputs.to(rank)
+    dataloader = DataLoader(input_ids, batch_size=BATCH_SIZE, shuffle=True)
 
+    # 4. 训练循环
+    for epoch in range(NUM_EPOCHS):
+        total_loss = 0.0
+        for batch in dataloader:
+            batch = batch.to(device)
             optimizer.zero_grad()
-            outputs = pruned_model(inputs)
-
-            # 计算 KL 损失
-            kl_losses = sum(kl_loss(layer.mu, layer.log_sigma) for layer in pruned_model.mlp_vib_layers)
-            kl_losses += sum(kl_loss(layer.mu, layer.log_sigma) for layer in pruned_model.attn_vib_layers)
-
-            loss = outputs.loss + beta * kl_losses
+            # 使用输入作为 labels（自回归语言模型任务）
+            outputs = pruned_model(input_ids=batch, attention_mask=(batch != tokenizer.pad_token_id), labels=batch)
+            if outputs["loss"] is None:
+                continue
+            loss = outputs["loss"] + BETA * outputs["kl_loss"]
             loss.backward()
             optimizer.step()
-
             total_loss += loss.item()
+        print(f"Epoch {epoch+1}/{NUM_EPOCHS}, Loss: {total_loss:.4f}")
 
-        print(f"[GPU {rank}] Epoch {epoch + 1}, Loss: {total_loss:.4f}")
-
-    # 6️⃣ 仅在主进程保存 Mask
-    if rank == 0:
-        torch.save(pruned_model.state_dict(), "pruned_llama7b.pth")
-        print("[GPU 0] 🎯 Mask 已保存！")
-
-    # 7️⃣ 关闭进程组
-    dist.destroy_process_group()
-
-
-
-# ✅ 运行分布式训练
-def main():
-    world_size = torch.cuda.device_count()  # 获取 GPU 数量
-    print(f"💡 发现 {world_size} 张 GPU，启动多卡训练...")
-
-    mp.spawn(train_mask, args=(world_size,), nprocs=world_size, join=True)
-
+    # 5. 保存模型（或仅保存 mask 参数）
+    save_path = "pruned_llama7b_vib.pth"
+    torch.save(pruned_model.module.state_dict(), save_path)
+    print(f"模型（包含 VIB mask）已保存到 {save_path}")
 
 if __name__ == "__main__":
-    main()
+    train_vib_mask()
