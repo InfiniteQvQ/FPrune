@@ -62,7 +62,16 @@ s1, s2 = 0.8, 1.2
 max_score, min_score = scores.max(), scores.min()
 normalized_scores = ((scores - min_score) / (max_score - min_score)) * (s2 - s1) + s1
 
-normalized_scores = 0.72 * normalized_scores
+mean = normalized_scores.mean()
+
+# 计算缩放因子
+scale = 0.7 / mean
+
+# 应用缩放
+normalized_scores = normalized_scores * scale
+
+# 打印结果确认均值
+print("New mean:", normalized_scores.mean())
 print(normalized_scores)
 print(normalized_scores.mean())
 print("\n🔝 LLaMA 7B 每层的归一化相对重要性:")
