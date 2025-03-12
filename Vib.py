@@ -16,14 +16,14 @@ model = AutoModelForCausalLM.from_pretrained(
 def singular_value_spectrum(weight_matrix):
     """计算 SVD 奇异值谱"""
     weight_matrix = weight_matrix.float()  # 避免 float16 报错
-    U, S, V = torch.linalg.svd(weight_matrix.cpu(), full_matrices=False)
+    U, S, V = torch.linalg.svd(weight_matrix.cpu().detach(), full_matrices=False)
     return S.numpy()
 
 def esd_spectrum(weight_matrix):
     """计算特征值谱分布 (ESD)"""
     weight_matrix = weight_matrix.float()  # 避免 float16 报错
-    eigenvalues = np.abs(np.linalg.eigvals((weight_matrix @ weight_matrix.T).cpu().detach().numpy()))
-    return eigenvalues
+    eigvals = np.abs(np.linalg.eigvals((weight_matrix @ weight_matrix.T).cpu().detach().numpy()))
+    return eigvals
 
 layer_importance_scores = {}
 
