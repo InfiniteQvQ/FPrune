@@ -11,7 +11,7 @@ model = AutoModelForCausalLM.from_pretrained(
     "pinkmanlove/llama-7b-hf",
     cache_dir=cache_dir,
     device_map="auto",
-    torch_dtype=torch.float32
+    torch_dtype=torch.float16
 ).to(device)  # 确保整个模型加载到 GPU
 
 def singular_value_spectrum(weight_matrix):
