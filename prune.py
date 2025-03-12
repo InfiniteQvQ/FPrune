@@ -968,8 +968,8 @@ def ww_sparsity_test_3b(args, model, device=torch.device("cuda:0"),
         1036.2628, 1064.6880, 1059.6061, 961.5208
     ])
 
-    max_score = torch.max(c)
-    min_score = torch.min(c)
+    max_score = np.max(c)
+    min_score = np.min(c)
     c2 = ((max_score - c) / (max_score - min_score)) * (s2 - s1) + s1
     c2 *= 0.71
     print(c2)
