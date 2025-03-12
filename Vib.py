@@ -70,9 +70,9 @@ class VIBWrappedLayer(nn.Module):
         self.vib = VIBLayerWrapper(hidden_dim, target_sparsity)
 
     def forward(self, x, attention_mask=None, position_ids=None, past_key_value=None, output_attentions=False, use_cache=False):
-        # 先对输入 x 施加 ViB mask
+        # 对输入 x 施加 ViB mask
         x_masked, kl = self.vib(x)
-        # 调用原始层 forward（注意不要传递额外参数）
+        # 调用原始层 forward（不要传递额外参数，如 hidden_mask）
         out = self.orig_layer(
             x_masked,
             attention_mask=attention_mask,
@@ -98,13 +98,17 @@ class VIBPrunedLlamaForCausalLM(nn.Module):
     def forward(self, input_ids, attention_mask, labels=None):
         # 获取输入 embedding
         x = self.orig_model.model.embed_tokens(input_ids)
+        batch_size, seq_len, _ = x.size()
+        device = x.device
+        # 自动生成 position_ids（形状为 (batch, seq_len)）
+        position_ids = torch.arange(seq_len, dtype=torch.long, device=device).unsqueeze(0).expand(batch_size, seq_len)
         total_kl = 0.0
         # 顺序执行每一层，累加 KL 损失
         for layer in self.orig_model.model.layers:
             x, kl = layer(
                 x,
                 attention_mask=attention_mask,
-                position_ids=None,
+                position_ids=position_ids,
                 past_key_value=None,
                 output_attentions=False,
                 use_cache=False
@@ -127,7 +131,6 @@ class VIBPrunedLlamaForCausalLM(nn.Module):
 # -------------------------
 def expand_attention_mask(mask):
     # mask: (batch, seq_len) boolean tensor
-    # 首先 unsqueeze 为 (batch, 1, 1, seq_len)，再 expand到 (batch, 1, seq_len, seq_len)
     batch_size, seq_len = mask.size()
     mask = mask.unsqueeze(1).unsqueeze(2)  # (batch, 1, 1, seq_len)
     mask = mask.expand(batch_size, 1, seq_len, seq_len)
@@ -139,7 +142,7 @@ def expand_attention_mask(mask):
 def train_vib_mask():
     accelerator = Accelerator()
 
-    # 1. 加载原始模型与 tokenizer（device_map="auto" 交由 accelerate 管理）
+    # 1. 加载原始模型与 tokenizer（device_map="auto" 由 accelerate 管理）
     model_name = "pinkmanlove/llama-7b-hf"
     tokenizer = AutoTokenizer.from_pretrained("HuggingFaceM4/llama-7b-tokenizer")
     cache_dir = "/root/autodl-tmp/llm_weights"  # 根据实际情况设置
@@ -182,7 +185,7 @@ def train_vib_mask():
         total_loss = 0.0
         for batch in dataloader:
             optimizer.zero_grad()
-            # 构造 attention mask：原始 mask 形状 (batch, seq_len) 转换为 (batch, 1, seq_len, seq_len)
+            # 构造 attention mask：输入 mask (batch, seq_len)
             raw_mask = (batch != tokenizer.pad_token_id)
             attn_mask = expand_attention_mask(raw_mask)
             outputs = model(
