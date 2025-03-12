@@ -55,13 +55,13 @@ class VIBLayerWrapper(nn.Module):
         return x_masked, kl
 
 # -------------------------
-# 定义包装后的 LLaMA 层，作用：在原层前对输入隐藏状态施加 ViB mask
+# 定义包装后的 LLaMA 层
 # -------------------------
 class VIBWrappedLayer(nn.Module):
     def __init__(self, orig_layer, hidden_dim, target_sparsity):
         """
-        orig_layer: 原始 LLaMA 层（包含内部子层）
-        hidden_dim: 待剪枝通道数
+        orig_layer: 原始 LLaMA 层（包含内部 7 个子层）
+        hidden_dim: 待剪枝通道数（通常为 config.hidden_size）
         target_sparsity: 目标剪枝率
         """
         super().__init__()
@@ -69,9 +69,12 @@ class VIBWrappedLayer(nn.Module):
         self.vib = VIBLayerWrapper(hidden_dim, target_sparsity)
 
     def forward(self, x, attention_mask=None, position_ids=None, past_key_value=None, output_attentions=False, use_cache=False):
-        # 对输入 x 施加 ViB mask
+        # 如果未传入 position_ids，则根据 x 自动生成
+        if position_ids is None:
+            batch_size, seq_len, _ = x.size()
+            position_ids = torch.arange(seq_len, device=x.device).unsqueeze(0).expand(batch_size, seq_len)
         x_masked, kl = self.vib(x)
-        # 调用原始层 forward（不要传递额外参数，如 hidden_mask）
+        # 调用原始层 forward（不要传入额外参数，如 hidden_mask）
         out = self.orig_layer(
             x_masked,
             attention_mask=attention_mask,
@@ -98,12 +101,15 @@ class VIBPrunedLlamaForCausalLM(nn.Module):
         # 获取输入 embedding
         x = self.orig_model.model.embed_tokens(input_ids)
         total_kl = 0.0
+        batch_size, seq_len = input_ids.shape
+        # 生成默认的 position_ids
+        position_ids = torch.arange(seq_len, device=x.device).unsqueeze(0).expand(batch_size, seq_len)
         # 顺序执行每一层，累加 KL 损失
         for layer in self.orig_model.model.layers:
             x, kl = layer(
                 x,
                 attention_mask=attention_mask,
-                position_ids=None,
+                position_ids=position_ids,
                 past_key_value=None,
                 output_attentions=False,
                 use_cache=False
@@ -126,9 +132,7 @@ class VIBPrunedLlamaForCausalLM(nn.Module):
 # -------------------------
 def train_vib_mask():
     accelerator = Accelerator()
-    # accelerator.device 是当前设备，但不要手动调用 .to() 以免破坏 accelerate 的分发
-
-    # 1. 加载原始模型与 tokenizer（使用 device_map="auto" 由 accelerate 管理）
+    # 1. 加载原始模型与 tokenizer（由 accelerate 管理设备分发）
     model_name = "pinkmanlove/llama-7b-hf"
     tokenizer = AutoTokenizer.from_pretrained("HuggingFaceM4/llama-7b-tokenizer")
     cache_dir = "/root/autodl-tmp/llm_weights"  # 根据实际情况设置
@@ -139,13 +143,13 @@ def train_vib_mask():
         torch_dtype=torch.float16,
         device_map="auto"
     )
-    # 不要对 orig_model 调用 .to()，accelerate 会处理
+    # 不手动调用 .to()，accelerate 会处理
 
     num_layers = len(orig_model.model.layers)
     if len(TARGET_SPARSITY_PER_LAYER) != num_layers:
         raise ValueError(f"Expected {num_layers} target sparsity values, but got {len(TARGET_SPARSITY_PER_LAYER)}")
     hidden_dim = orig_model.config.hidden_size
-    # 替换每一层为 VIBWrappedLayer（注意：内部 accelerate hooks 会保持不变）
+    # 替换每一层为 VIBWrappedLayer
     for i in range(num_layers):
         orig_layer = orig_model.model.layers[i]
         vib_layer = VIBWrappedLayer(orig_layer, hidden_dim, TARGET_SPARSITY_PER_LAYER[i])
@@ -159,10 +163,9 @@ def train_vib_mask():
     texts = dataset["text"]
     tokenized = tokenizer(texts, return_tensors="pt", padding=True, truncation=True, max_length=MAX_SEQ_LENGTH)
     input_ids = tokenized["input_ids"]
-
     dataloader = DataLoader(input_ids, batch_size=BATCH_SIZE, shuffle=True)
 
-    # 3. 使用 accelerate 准备模型、优化器、数据加载器
+    # 3. 定义优化器并使用 accelerate.prepare() 处理模型、优化器、数据加载器
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
     model, optimizer, dataloader = accelerator.prepare(model, optimizer, dataloader)
 
@@ -176,14 +179,13 @@ def train_vib_mask():
                 attention_mask=(batch != tokenizer.pad_token_id),
                 labels=batch
             )
-            # 总损失 = LM 损失 + BETA * 所有层的 KL 损失
             loss = outputs["loss"] + BETA * outputs["kl_loss"]
             accelerator.backward(loss)
             optimizer.step()
             total_loss += loss.item()
         print(f"Epoch {epoch+1}/{NUM_EPOCHS}, Loss: {total_loss:.4f}")
 
-    # 4. 保存模型（accelerate 会自动处理多 GPU模型的解包）
+    # 4. 保存模型（accelerate 会自动处理多 GPU 模型的解包）
     save_path = "vib_pruned_llama7b.pth"
     accelerator.wait_for_everyone()
     unwrapped_model = accelerator.unwrap_model(model)
