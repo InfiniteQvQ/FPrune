@@ -1,41 +1,46 @@
 import torch
 import numpy as np
+import matplotlib.pyplot as plt
+from scipy.stats import entropy
 from transformers import AutoModelForCausalLM
 
-# ✅ 自动选择 GPU
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-# ✅ 加载 LLaMA-7B
+# 🛠️ 设置缓存目录
 cache_dir = "/root/autodl-tmp/llm_weights"
+
+# 🚀 加载 LLaMA-7B（自动分配 GPU，避免显存溢出）
 model = AutoModelForCausalLM.from_pretrained(
     "pinkmanlove/llama-7b-hf",
     cache_dir=cache_dir,
-    device_map="auto",
-    torch_dtype=torch.bfloat16
-).to(device)  # 确保整个模型加载到 GPU
+    device_map="auto",   # ✅ 自动分配 GPU/CPU
+    torch_dtype=torch.float16,  # ✅ 降低精度，减少显存
+    offload_state_dict=True     # ✅ 部分权重存入 CPU
+)
 
+# 🎯 计算 SVD 奇异值谱
 def singular_value_spectrum(weight_matrix):
-    """计算 SVD 奇异值谱（在 GPU 运行）"""
-    weight_matrix = weight_matrix.to(device).float()  # 确保在 GPU 上
-    U, S, V = torch.linalg.svd(weight_matrix, full_matrices=False)  # 直接在 GPU 计算 SVD
-    return S.detach().cpu().numpy()  # 计算完成后转换为 NumPy 数组
+    """计算 SVD 奇异值谱"""
+    weight_matrix = weight_matrix.float()  # 避免 float16 报错
+    U, S, V = torch.linalg.svd(weight_matrix.cpu().detach(), full_matrices=False)
+    return S.numpy()
 
+# 🎯 计算特征值谱分布 (ESD)
 def esd_spectrum(weight_matrix):
-    """计算特征值谱分布 (ESD)（在 GPU 运行）"""
-    weight_matrix = weight_matrix.to(device).float()  # 确保在 GPU 上
-    gram_matrix = weight_matrix @ weight_matrix.T  # 计算 Gram 矩阵
-    eigenvalues, _ = torch.linalg.eigh(gram_matrix)  # GPU 计算特征值
-    return eigenvalues.abs().detach().cpu().numpy()  # 计算完成后转换为 NumPy 数组
+    """计算特征值谱分布 (ESD)"""
+    weight_matrix = weight_matrix.float()  # 避免 float16 报错
+    eigvals = np.abs(np.linalg.eigvals((weight_matrix @ weight_matrix.T).cpu().detach().numpy()))
+    return eigvals
 
+# 🏆 存储每层的重要性
 layer_importance_scores = {}
 
+# 🔥 遍历 LLaMA-7B 的每一层
 for layer_idx, layer in enumerate(model.model.layers):
     print(f"Processing Layer {layer_idx}...")
 
     # 🧠 Attention 层
-    q_proj = layer.self_attn.q_proj.weight.to(device)
-    k_proj = layer.self_attn.k_proj.weight.to(device)
-    v_proj = layer.self_attn.v_proj.weight.to(device)
+    q_proj = layer.self_attn.q_proj.weight
+    k_proj = layer.self_attn.k_proj.weight
+    v_proj = layer.self_attn.v_proj.weight
     attn_score = np.mean([
         np.sum(singular_value_spectrum(q_proj)), 
         np.sum(singular_value_spectrum(k_proj)), 
@@ -43,9 +48,9 @@ for layer_idx, layer in enumerate(model.model.layers):
     ])  # SVD 计算重要性
 
     # 🔥 MLP 层
-    gate_proj = layer.mlp.gate_proj.weight.to(device)
-    up_proj = layer.mlp.up_proj.weight.to(device)
-    down_proj = layer.mlp.down_proj.weight.to(device)
+    gate_proj = layer.mlp.gate_proj.weight
+    up_proj = layer.mlp.up_proj.weight
+    down_proj = layer.mlp.down_proj.weight
     mlp_score = np.mean([
         np.sum(esd_spectrum(gate_proj)), 
         np.sum(esd_spectrum(up_proj)), 
@@ -53,12 +58,16 @@ for layer_idx, layer in enumerate(model.model.layers):
     ])  # ESD 计算重要性
 
     # 🎯 Output 层
-    output_proj = layer.self_attn.o_proj.weight.to(device)
+    output_proj = layer.self_attn.o_proj.weight
     output_score = np.sum(singular_value_spectrum(output_proj))  # SVD 计算重要性
 
     # 📊 计算相对重要性
     layer_relative_importance = attn_score + mlp_score + output_score
     layer_importance_scores[layer_idx] = layer_relative_importance
+
+    # 🚀 清理显存
+    del q_proj, k_proj, v_proj, gate_proj, up_proj, down_proj, output_proj
+    torch.cuda.empty_cache()
 
 # 🚀 排序
 sorted_layers = sorted(layer_importance_scores.items(), key=lambda x: x[1], reverse=True)
