@@ -971,6 +971,8 @@ def ww_sparsity_test_3b(args, model, device=torch.device("cuda:0"),
     max_score = torch.max(c)
     min_score = torch.min(c)
     c2 = ((max_score - c) / (max_score - min_score)) * (s2 - s1) + s1
+    c2 *= 0.71
+    print(c2)
     a = []
     for i in c2:
         for j in range(7):
