@@ -1,112 +1,141 @@
 import torch
 import torch.nn as nn
-from transformers import LlamaForCausalLM, LlamaConfig, AutoModelForCausalLM
+import torch.optim as optim
+from transformers import AutoModelForCausalLM, AutoTokenizer
+import torch.distributed as dist
+import torch.multiprocessing as mp
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader, DistributedSampler
+from datasets import load_dataset
+import os
 
-class InformationBottleneck(nn.Module):
-    def __init__(self, dim, prune_ratio=0.5):
+# ✅ 每层的剪枝率
+TARGET_SPARSITY_PER_LAYER = [
+    0.3, 0.5, 0.6, 0.4, 0.7, 0.5, 0.6, 0.8, 0.5, 0.4, 0.3, 0.5, 0.7, 0.6, 0.8, 0.4,
+    0.5, 0.6, 0.7, 0.8, 0.5, 0.4, 0.6, 0.7, 0.5, 0.3, 0.8, 0.7, 0.6, 0.5, 0.9
+]  # 32 层，每层不同剪枝率
+
+# ✅ VIB Mask 层
+class VIBLayer(nn.Module):
+    def __init__(self, input_dim, target_sparsity):
         super().__init__()
-        self.dim = dim
-        self.prune_ratio = prune_ratio  # 该层的目标剪枝比例
-        self.epsilon = 1e-8
-        
-        self.mu = nn.Parameter(torch.ones(dim))  # 重要性参数
-        self.logD = nn.Parameter(torch.zeros(dim))  # 计算 logα
-    
-    def get_mask(self):
-        """ 根据目标剪枝比例计算 mask """
-        logalpha = self.logD - torch.log(self.mu.pow(2) + self.epsilon)
-        num_pruned = int(self.dim * self.prune_ratio)
-        
-        sorted_indices = torch.argsort(logalpha)
-        mask = torch.ones_like(logalpha)
-        mask[sorted_indices[:num_pruned]] = 0  # 剪枝
-        
-        return mask.float()
+        self.mu = nn.Parameter(torch.randn(input_dim) * 0.01)
+        self.log_sigma = nn.Parameter(torch.randn(input_dim) * 0.01)
+        self.target_sparsity = target_sparsity
 
     def forward(self, x):
-        mask = self.get_mask()
-        return x * mask
+        std = torch.exp(0.5 * self.log_sigma)
+        eps = torch.randn_like(std)
+        z = self.mu + eps * std
+        mask = torch.sigmoid(z)
+
+        # 计算阈值，使剪枝率符合 target_sparsity
+        sorted_mask, _ = torch.sort(mask)
+        threshold = sorted_mask[int(len(mask) * self.target_sparsity)]
+        final_mask = (mask > threshold).float()
+        return x * final_mask
 
 
-def compute_pruning_ratios(layer_config, target_sparsity):
-    total_params = sum(layer_config.values())
-    prune_target = total_params * target_sparsity
-    
-    pruning_ratios = {}
-    for key, param_count in layer_config.items():
-        pruning_ratios[key] = prune_target * (param_count / total_params) / param_count
-    
-    return pruning_ratios
-
-
-class LlamaDecoderLayer(nn.Module):
-    def __init__(self, config, layer_idx):
+# ✅ 重新封装 LLaMA，添加 VIB 层
+class PrunedLlama(nn.Module):
+    def __init__(self, model, target_sparsity_per_layer):
         super().__init__()
-        target_sparsity = 0.7  # 目标剪枝比例
-        
-        layer_config = {
-            "q_proj": config.hidden_size * config.hidden_size,
-            "k_proj": config.hidden_size * config.hidden_size,
-            "v_proj": config.hidden_size * config.hidden_size,
-            "o_proj": config.hidden_size * config.hidden_size,
-            "gate_proj": config.hidden_size * config.ffn_dim,
-            "up_proj": config.hidden_size * config.ffn_dim,
-            "down_proj": config.ffn_dim * config.hidden_size
-        }
-        
-        pruning_ratios = compute_pruning_ratios(layer_config, target_sparsity)
+        self.model = model
+        self.num_layers = len(model.model.layers)
 
-        self.q_proj = nn.Linear(config.hidden_size, config.hidden_size)
-        self.k_proj = nn.Linear(config.hidden_size, config.hidden_size)
-        self.v_proj = nn.Linear(config.hidden_size, config.hidden_size)
-        self.o_proj = nn.Linear(config.hidden_size, config.hidden_size)
-        
-        self.gate_proj = nn.Linear(config.hidden_size, config.ffn_dim)
-        self.up_proj = nn.Linear(config.hidden_size, config.ffn_dim)
-        self.down_proj = nn.Linear(config.ffn_dim, config.hidden_size)
-        
-        self.ib_q = InformationBottleneck(config.hidden_size, pruning_ratios["q_proj"])
-        self.ib_k = InformationBottleneck(config.hidden_size, pruning_ratios["k_proj"])
-        self.ib_v = InformationBottleneck(config.hidden_size, pruning_ratios["v_proj"])
-        self.ib_o = InformationBottleneck(config.hidden_size, pruning_ratios["o_proj"])
-        
-        self.ib_gate = InformationBottleneck(config.ffn_dim, pruning_ratios["gate_proj"])
-        self.ib_up = InformationBottleneck(config.ffn_dim, pruning_ratios["up_proj"])
-        self.ib_down = InformationBottleneck(config.hidden_size, pruning_ratios["down_proj"])
+        # 为每一层的 MLP 和 Attention 创建独立的 Mask
+        self.mlp_vib_layers = nn.ModuleList([
+            VIBLayer(model.model.layers[i].mlp.down_proj.weight.shape[0], target_sparsity_per_layer[i]) 
+            for i in range(self.num_layers)
+        ])
+
+        self.attn_vib_layers = nn.ModuleList([
+            VIBLayer(model.model.layers[i].self_attn.o_proj.weight.shape[0], target_sparsity_per_layer[i]) 
+            for i in range(self.num_layers)
+        ])
 
     def forward(self, x):
-        q = self.ib_q(self.q_proj(x))
-        k = self.ib_k(self.k_proj(x))
-        v = self.ib_v(self.v_proj(x))
-        o = self.ib_o(self.o_proj(x))
-        
-        x = self.ib_gate(self.gate_proj(x))
-        x = self.ib_up(self.up_proj(x))
-        x = self.ib_down(self.down_proj(x))
-
+        for i, layer in enumerate(self.model.model.layers):
+            x = self.mlp_vib_layers[i](x)
+            x = self.attn_vib_layers[i](x)
+            x = layer(x)  # 进入 LLaMA 原始结构
         return x
 
 
-class PrunedLlamaModel(nn.Module):
-    def __init__(self, model_name="meta-llama/Meta-Llama-3-8B"):
-        super().__init__()
-        cache_dir = "/root/autodl-tmp/llm_weights"
-        self.config = LlamaConfig.from_pretrained(model_name)
-        model = AutoModelForCausalLM.from_pretrained(
-            "meta-llama/Llama-3.1-8B",
-            cache_dir=cache_dir,
-            device_map="auto",  # 让 Hugging Face 自动分配多个 GPU
-            torch_dtype=torch.float16
-        )
+# ✅ KL 约束 Loss
+def kl_loss(mu, log_sigma):
+    return -0.5 * torch.sum(1 + log_sigma - mu.pow(2) - log_sigma.exp())
 
-        self.model.model.layers = nn.ModuleList([
-            LlamaDecoderLayer(self.config, i) for i in range(self.config.num_hidden_layers)
-        ])
 
-    def forward(self, input_ids, attention_mask=None):
-        return self.model(input_ids, attention_mask=attention_mask)
+# ✅ 训练函数（多卡支持）
+def train_mask(rank, world_size):
+    # 1️⃣ 初始化分布式训练
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    torch.cuda.set_device(rank)
+
+    # 2️⃣ 加载 LLaMA 模型
+    model_name = "pinkmanlove/llama-7b-hf"
+    tokenizer = AutoTokenizer.from_pretrained("HuggingFaceM4/llama-7b-tokenizer")
+    cache_dir = "/root/autodl-tmp/llm_weights"
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        cache_dir=cache_dir,
+        torch_dtype=torch.float16
+    ).to(rank)
+
+    # 3️⃣ 初始化剪枝模型（多卡模式）
+    pruned_model = PrunedLlama(model, TARGET_SPARSITY_PER_LAYER).to(rank)
+    pruned_model = DDP(pruned_model, device_ids=[rank], output_device=rank)
+
+    # 4️⃣ 加载训练数据
+    dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
+    train_texts = dataset["text"]
+    train_tokens = tokenizer(train_texts, return_tensors="pt", padding=True, truncation=True, max_length=512)
+    
+    train_sampler = DistributedSampler(train_tokens["input_ids"], num_replicas=world_size, rank=rank, shuffle=True)
+    train_loader = DataLoader(train_tokens["input_ids"], batch_size=4, sampler=train_sampler)
+
+    # 5️⃣ 训练 Mask
+    optimizer = optim.Adam(pruned_model.parameters(), lr=5e-4)
+    beta = 1e-5
+
+    for epoch in range(5):  # 训练 5 轮
+        train_sampler.set_epoch(epoch)  # 设置采样器的 epoch，保证多卡同步
+        total_loss = 0
+        for inputs in train_loader:
+            inputs = inputs.to(rank)
+
+            optimizer.zero_grad()
+            outputs = pruned_model(inputs)
+
+            # 计算 KL 损失
+            kl_losses = sum(kl_loss(layer.mu, layer.log_sigma) for layer in pruned_model.module.mlp_vib_layers)
+            kl_losses += sum(kl_loss(layer.mu, layer.log_sigma) for layer in pruned_model.module.attn_vib_layers)
+
+            loss = outputs.loss + beta * kl_losses
+            loss.backward()
+            optimizer.step()
+
+            total_loss += loss.item()
+
+        print(f"[GPU {rank}] Epoch {epoch + 1}, Loss: {total_loss:.4f}")
+
+    # 6️⃣ 保存 Mask（只在主进程保存）
+    if rank == 0:
+        torch.save(pruned_model.module.state_dict(), "pruned_llama7b.pth")
+        print("[GPU 0] 🎯 Mask 已保存！")
+
+    # 7️⃣ 关闭进程组
+    dist.destroy_process_group()
+
+
+# ✅ 运行分布式训练
+def main():
+    world_size = torch.cuda.device_count()  # 获取 GPU 数量
+    print(f"💡 发现 {world_size} 张 GPU，启动多卡训练...")
+
+    mp.spawn(train_mask, args=(world_size,), nprocs=world_size, join=True)
 
 
 if __name__ == "__main__":
-    model = PrunedLlamaModel()
-    print("Pruned LLaMA model loaded successfully.")
+    main()
