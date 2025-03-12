@@ -61,7 +61,10 @@ scores = torch.tensor([imp[1] for imp in layer_importance_scores])
 s1, s2 = 0.8, 1.2
 max_score, min_score = scores.max(), scores.min()
 normalized_scores = ((scores - min_score) / (max_score - min_score)) * (s2 - s1) + s1
-
+current_mean = normalized_scores.mean()
+normalized_scores = 0.7 + (normalized_scores - current_mean)
+print(normalized_scores)
+print(normalized_scores.mean())
 print("\n🔝 LLaMA 7B 每层的归一化相对重要性:")
 for (idx, _), importance in zip(layer_importance_scores, normalized_scores.tolist()):
     print(f"Layer {idx}: {importance:.4f}")
