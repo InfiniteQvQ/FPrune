@@ -62,7 +62,7 @@ class PrunedLlama(nn.Module):
     def forward(self, x):
         kl_total = 0  # 统计 KL Loss
         for i, layer in enumerate(self.model.model.layers):
-            x, mask_mlp = self.mlp_vib_layers[i](x)
+            x, mask_mlp = self.mlp_vib_layers[i](x)  # ✅ 确保 mask 形状正确
             x, mask_attn = self.attn_vib_layers[i](x)
             x = layer(x)  # 进入 LLaMA 原始结构
 
