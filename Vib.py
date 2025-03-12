@@ -13,9 +13,10 @@ import os
 TARGET_SPARSITY_PER_LAYER = [
     0.3, 0.5, 0.6, 0.4, 0.7, 0.5, 0.6, 0.8, 0.5, 0.4, 0.3, 0.5, 0.7, 0.6, 0.8, 0.4,
     0.5, 0.6, 0.7, 0.8, 0.5, 0.4, 0.6, 0.7, 0.5, 0.3, 0.8, 0.7, 0.6, 0.5, 0.9
-]  # 32 层，每层不同剪枝率
+] * 7  # 32 层，每层不同剪枝率
 
-# ✅ VIB Mask 层
+
+# ✅ Variational Information Bottleneck (VIB) Mask 层
 class VIBLayer(nn.Module):
     def __init__(self, input_dim, target_sparsity):
         super().__init__()
@@ -27,16 +28,16 @@ class VIBLayer(nn.Module):
         std = torch.exp(0.5 * self.log_sigma)
         eps = torch.randn_like(std)
         z = self.mu + eps * std
-        mask = torch.sigmoid(z)
+        mask = torch.sigmoid(z)  # 生成 soft mask
 
         # 计算阈值，使剪枝率符合 target_sparsity
         sorted_mask, _ = torch.sort(mask)
         threshold = sorted_mask[int(len(mask) * self.target_sparsity)]
         final_mask = (mask > threshold).float()
-        return x * final_mask
+        return x * final_mask, mask  # 返回剪枝后的张量 & 原始 mask
 
 
-# ✅ 重新封装 LLaMA，添加 VIB 层
+# ✅ 重新封装 LLaMA，添加 **每层独立** 的 VIB 层
 class PrunedLlama(nn.Module):
     def __init__(self, model, target_sparsity_per_layer):
         super().__init__()
@@ -45,21 +46,27 @@ class PrunedLlama(nn.Module):
 
         # 为每一层的 MLP 和 Attention 创建独立的 Mask
         self.mlp_vib_layers = nn.ModuleList([
-            VIBLayer(model.model.layers[i].mlp.down_proj.weight.shape[0], target_sparsity_per_layer[i]) 
+            VIBLayer(model.model.layers[i].mlp.down_proj.weight.shape[0], target_sparsity_per_layer[i])
             for i in range(self.num_layers)
         ])
 
         self.attn_vib_layers = nn.ModuleList([
-            VIBLayer(model.model.layers[i].self_attn.o_proj.weight.shape[0], target_sparsity_per_layer[i]) 
+            VIBLayer(model.model.layers[i].self_attn.o_proj.weight.shape[0], target_sparsity_per_layer[i])
             for i in range(self.num_layers)
         ])
 
     def forward(self, x):
+        kl_total = 0  # 统计 KL Loss
         for i, layer in enumerate(self.model.model.layers):
-            x = self.mlp_vib_layers[i](x)
-            x = self.attn_vib_layers[i](x)
+            x, mask_mlp = self.mlp_vib_layers[i](x)
+            x, mask_attn = self.attn_vib_layers[i](x)
             x = layer(x)  # 进入 LLaMA 原始结构
-        return x
+
+            # 计算 KL 损失
+            kl_total += kl_loss(self.mlp_vib_layers[i].mu, self.mlp_vib_layers[i].log_sigma)
+            kl_total += kl_loss(self.attn_vib_layers[i].mu, self.attn_vib_layers[i].log_sigma)
+
+        return x, kl_total
 
 
 # ✅ KL 约束 Loss
@@ -85,8 +92,6 @@ def train_mask(rank, world_size):
 
     print(f"🔥 Model has {len(model.model.layers)} layers")
     print(f"🔥 Target sparsity list has {len(TARGET_SPARSITY_PER_LAYER)} values")
-    num_layers = len(model.model.layers)
-    TARGET_SPARSITY_PER_LAYER = [0.7] * num_layers
 
     # 3️⃣ 初始化剪枝模型（多卡模式）
     pruned_model = PrunedLlama(model, TARGET_SPARSITY_PER_LAYER).to(rank)
@@ -96,7 +101,7 @@ def train_mask(rank, world_size):
     dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
     train_texts = dataset["text"]
     train_tokens = tokenizer(train_texts, return_tensors="pt", padding=True, truncation=True, max_length=512)
-    
+
     train_sampler = DistributedSampler(train_tokens["input_ids"], num_replicas=world_size, rank=rank, shuffle=True)
     train_loader = DataLoader(train_tokens["input_ids"], batch_size=4, sampler=train_sampler)
 
@@ -111,11 +116,7 @@ def train_mask(rank, world_size):
             inputs = inputs.to(rank)
 
             optimizer.zero_grad()
-            outputs = pruned_model(inputs)
-
-            # 计算 KL 损失
-            kl_losses = sum(kl_loss(layer.mu, layer.log_sigma) for layer in pruned_model.module.mlp_vib_layers)
-            kl_losses += sum(kl_loss(layer.mu, layer.log_sigma) for layer in pruned_model.module.attn_vib_layers)
+            outputs, kl_losses = pruned_model(inputs)  # 计算 KL Loss
 
             loss = outputs.loss + beta * kl_losses
             loss.backward()
