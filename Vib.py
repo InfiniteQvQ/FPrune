@@ -64,11 +64,9 @@ def process_layer(layer_idx, layer):
     output_svd_entropy = spectral_entropy(singular_value_spectrum(output_proj))  # ✅ SVD + 谱熵 计算
 
     # 📊 计算相对重要性
-    layer_relative_importance = attn_svd_entropy * 0.4 - (mlp_esd * 0.6) + output_svd_entropy * 0.3
+    layer_relative_importance = attn_svd_entropy * 0.5 - (mlp_esd * 0.5) + output_svd_entropy * 0.1
 
-    # 🚀 保护前几层（防止过度剪枝）
-    if layer_idx < 4:
-        layer_relative_importance *= 1.2  # 提升前几层重要性
+    
 
     # 🚀 释放显存
     del q_proj, k_proj, v_proj, gate_proj, up_proj, down_proj, output_proj
