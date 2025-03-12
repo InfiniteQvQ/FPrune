@@ -13,7 +13,7 @@ model = AutoModelForCausalLM.from_pretrained(
     cache_dir=cache_dir,
     device_map="auto",   # ✅ 自动分配 GPU/CPU
     torch_dtype=torch.float16,  # ✅ 降低精度，减少显存
-    offload_state_dict=True     # ✅ 部分权重存入 CPU
+
 )
 
 # 🎯 计算 SVD 奇异值谱
