@@ -48,48 +48,40 @@ class VIBLayerWrapper(nn.Module):
         cutoff_index = int(len(sorted_probs) * self.target_sparsity)
         threshold = sorted_probs[cutoff_index]
         final_mask = (mask_prob > threshold).float()  # [hidden_dim]
-        final_mask = final_mask.view(1, 1, -1)  # 扩展用于广播
+        final_mask = final_mask.view(1, 1, -1).to(x.device)  # 确保与 x 在同一设备
         x_masked = x * final_mask
-        # KL 损失：标准公式（未归一化，可根据需要除以元素数目）
+        # 计算 KL 损失
         kl = -0.5 * torch.sum(1 + self.log_sigma - self.mu.pow(2) - torch.exp(self.log_sigma))
         return x_masked, kl
 
 # -------------------------
 # 定义包装后的 LLaMA 层，作用：在原层前对输入隐藏状态施加 ViB mask
 # -------------------------
-class VIBLayerWrapper(nn.Module):
-    def __init__(self, hidden_dim, target_sparsity):
+class VIBWrappedLayer(nn.Module):
+    def __init__(self, orig_layer, hidden_dim, target_sparsity):
         """
-        hidden_dim: 待剪枝通道数（通常为 config.hidden_size）
-        target_sparsity: 目标剪枝率，例如 0.7 表示剪掉 70% 的通道
+        orig_layer: 原始 LLaMA 层（包含内部子层）
+        hidden_dim: 待剪枝通道数
+        target_sparsity: 目标剪枝率
         """
         super().__init__()
-        self.hidden_dim = hidden_dim
-        self.mu = nn.Parameter(torch.randn(hidden_dim) * 0.01)
-        self.log_sigma = nn.Parameter(torch.randn(hidden_dim) * 0.01)
-        self.target_sparsity = target_sparsity
+        self.orig_layer = orig_layer
+        self.vib = VIBLayerWrapper(hidden_dim, target_sparsity)
 
-    def forward(self, x):
-        """
-        x: (batch, seq_len, hidden_dim)
-        产生一个 (1, 1, hidden_dim) 的 mask 用于剪枝 x
-        """
-        std = torch.exp(0.5 * self.log_sigma)
-        eps = torch.randn_like(std)
-        z = self.mu + eps * std
-        mask_prob = torch.sigmoid(z)  # [hidden_dim]
-        # 根据排序确定阈值，使得大约 target_sparsity 的比例被置0
-        sorted_probs, _ = torch.sort(mask_prob.view(-1))
-        cutoff_index = int(len(sorted_probs) * self.target_sparsity)
-        threshold = sorted_probs[cutoff_index]
-        final_mask = (mask_prob > threshold).float()  # [hidden_dim]
-        # 将 mask 扩展为 (1,1,hidden_dim) 并移动到 x 的设备上
-        final_mask = final_mask.view(1, 1, -1).to(x.device)
-        x_masked = x * final_mask
-        # 计算 KL 损失
-        kl = -0.5 * torch.sum(1 + self.log_sigma - self.mu.pow(2) - torch.exp(self.log_sigma))
-        return x_masked, kl
-
+    def forward(self, x, attention_mask=None, position_ids=None, past_key_value=None, output_attentions=False, use_cache=False):
+        # 对输入 x 施加 ViB mask
+        x_masked, kl = self.vib(x)
+        # 调用原始层 forward（不要传递额外参数，如 hidden_mask）
+        out = self.orig_layer(
+            x_masked,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_value=past_key_value,
+            output_attentions=output_attentions,
+            use_cache=use_cache
+        )
+        # 原始层返回 tuple，取第一个元素为隐藏状态输出
+        return out[0], kl
 
 # -------------------------
 # 定义最终模型包装器，将所有层的 KL 损失累加
