@@ -960,9 +960,19 @@ def ww_sparsity_llama_7b(args, model, device=torch.device("cuda:0"),
 def ww_sparsity_test_3b(args, model, device=torch.device("cuda:0"),
                          s1=0.8, s2=1.2, ratios=None, prune_n=0, prune_m=0,
                          weight_esd=0.8, eps=1e-8):
-    c = [0.5] * 32
+    c = np.array([
+        506.8768, 606.8442, 787.8104, 829.8609, 840.8214, 839.7997, 854.4584, 
+        846.6010, 829.8934, 807.1963, 836.5080, 869.8415, 836.7288, 857.7931, 
+        865.3506, 882.7126, 919.9971, 923.5760, 922.0623, 948.1254, 978.1926, 
+        964.4994, 978.7308, 971.8586, 995.7953, 1022.6650, 1039.3917, 1051.9595, 
+        1036.2628, 1064.6880, 1059.6061, 961.5208
+    ])
+
+    max_score = torch.max(c)
+    min_score = torch.min(c)
+    c2 = ((max_score - c) / (max_score - min_score)) * (s2 - s1) + s1
     a = []
-    for i in c:
+    for i in c2:
         for j in range(7):
             a.append(i)
     return a
