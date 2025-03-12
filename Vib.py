@@ -47,7 +47,7 @@ def process_layer(layer_idx, layer):
     output_hill = pl_alpha_hill(layer.self_attn.o_proj.weight)
 
     # 📊 计算相对重要性
-    layer_relative_importance = (1 / attn_hill) + (1 / mlp_hill) + (1 / output_hill)
+    layer_relative_importance = attn_hill + mlp_hill + output_hill
     print(layer_relative_importance)
     return layer_idx, layer_relative_importance
 
