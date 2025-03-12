@@ -88,6 +88,6 @@ normalized_scores = ((scores - min_score) / (max_score - min_score)) * (s2 - s1)
 # 🚀 排序
 sorted_layers = sorted(zip([imp[0] for imp in layer_importance_scores], normalized_scores.tolist()), key=lambda x: x[1], reverse=True)
 
-print("\n🔝 LLaMA 7B 每层的归一化相对重要性排序:")
-for idx, importance in normalized_scores:
+print("\n🔝 LLaMA 7B 每层的归一化相对重要性:")
+for (idx, _), importance in zip(layer_importance_scores, normalized_scores.tolist()):
     print(f"Layer {idx}: {importance:.4f}")
