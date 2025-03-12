@@ -83,6 +83,11 @@ def train_mask(rank, world_size):
         torch_dtype=torch.float16
     ).to(rank)
 
+    print(f"🔥 Model has {len(model.model.layers)} layers")
+    print(f"🔥 Target sparsity list has {len(TARGET_SPARSITY_PER_LAYER)} values")
+    num_layers = len(model.model.layers)
+    TARGET_SPARSITY_PER_LAYER = [0.7] * num_layers
+
     # 3️⃣ 初始化剪枝模型（多卡模式）
     pruned_model = PrunedLlama(model, TARGET_SPARSITY_PER_LAYER).to(rank)
     pruned_model = DDP(pruned_model, device_ids=[rank], output_device=rank)
