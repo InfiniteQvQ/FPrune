@@ -960,21 +960,50 @@ def ww_sparsity_llama_7b(args, model, device=torch.device("cuda:0"),
 def ww_sparsity_test_3b(args, model, device=torch.device("cuda:0"),
                          s1=0.8, s2=1.2, ratios=None, prune_n=0, prune_m=0,
                          weight_esd=0.8, eps=1e-8):
-    c = np.array([
-        506.8768, 606.8442, 787.8104, 829.8609, 840.8214, 839.7997, 854.4584, 
-        846.6010, 829.8934, 807.1963, 836.5080, 869.8415, 836.7288, 857.7931, 
-        865.3506, 882.7126, 919.9971, 923.5760, 922.0623, 948.1254, 978.1926, 
-        964.4994, 978.7308, 971.8586, 995.7953, 1022.6650, 1039.3917, 1051.9595, 
-        1036.2628, 1064.6880, 1059.6061, 961.5208
-    ])
+    
+    if "opt" in args.model:
+        blocks = model.model.decoder.layers    
+    else:
+        blocks = model.model.layers
 
-    max_score = np.max(c)
-    min_score = np.min(c)
-    c2 = ((max_score - c) / (max_score - min_score)) * (s2 - s1) + s1
-    c2 *= 0.71
-    print(c2)
+    # 得到待剪枝层字典，假设 find_layers 返回的顺序与 transformer 层顺序一致，
+    # 每个 transformer 层内有7个子层
+    layers = [find_layers(blocks)]
+    prunables = []
+    for layer in layers:
+        for name in layer:
+            prunables.append(layer[name].weight.numel())
+    layer_num_in_block = int(len(prunables) / len(blocks))
+    
+    # 加载ESD指标
+    metrics = np.load(f"{args.ww_metric_cache}/{args.ww_metric}.npy")
+    print("ESD raw metrics:", metrics)
+    if args.mapping_type == 'block_wise':
+        block_metrics = [np.mean(metrics[i:i+layer_num_in_block]) 
+                         for i in range(0, len(metrics), layer_num_in_block)]
+        metrics = [i for i in block_metrics for j in range(layer_num_in_block)]
+    print("ESD metric values after block_wise processing:", metrics)
+
+
+    scores = torch.tensor(metrics, dtype=torch.float32)
+    prunables_tensor = torch.tensor(prunables, dtype=torch.float32)
+    max_score = torch.max(scores)
+    min_score = torch.min(scores)
+    # 线性映射到 [s1, s2]
+    layerwise_pruning_ratios_esd = (((scores - min_score) / (max_score - min_score)) * (s2 - s1) + s1)
+    scaler = torch.sum(prunables_tensor) * args.sparsity_ratio / (torch.sum(prunables_tensor * layerwise_pruning_ratios_esd))
+    layerwise_pruning_ratios_esd = layerwise_pruning_ratios_esd * scaler
+    layerwise_pruning_ratios_esd = layerwise_pruning_ratios_esd.cpu().numpy().tolist()
+    print("ESD-based ratios:", layerwise_pruning_ratios_esd)
+
+    c = np.array([0.576 , 0.6406, 0.6823, 0.6562, 0.6596, 0.653 , 0.6521, 0.6374,
+       0.6158, 0.5929, 0.611 , 0.6121, 0.6073, 0.6264, 0.6336, 0.7026,
+       0.7186, 0.7512, 0.7918, 0.809 , 0.8447, 0.8535, 0.8131, 0.8008,
+       0.8503, 0.864 , 0.863 , 0.8378, 0.8168, 0.8619, 0.8443, 0.7361])
+
+    print(c)
     a = []
-    for i in c2:
+    for i in c:
         for j in range(7):
             a.append(i)
     return a
