@@ -13,7 +13,7 @@ cache_dir = "/root/autodl-tmp/llm_weights"
 model = AutoModelForCausalLM.from_pretrained(
     "pinkmanlove/llama-7b-hf",
     cache_dir=cache_dir,
-    device_map="cpu",   # ✅ 强制使用 CPU
+    device_map="auto",   # ✅ 强制使用 CPU
     torch_dtype=torch.float32,  # ✅ 保持计算精度
 )
 
