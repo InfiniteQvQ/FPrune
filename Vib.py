@@ -13,83 +13,54 @@ model = AutoModelForCausalLM.from_pretrained(
     torch_dtype=torch.float32
 )
 
-# 计算特征值谱熵
-def spectral_entropy(matrix):
-    """ 计算特征值谱熵 (Spectral Entropy) """
-    matrix = matrix.detach().cpu().numpy()
-    eigenvalues = np.abs(np.linalg.eigvals(matrix))
-    eigenvalues = eigenvalues / np.sum(eigenvalues)  # 归一化
-    return entropy(eigenvalues)  # 计算熵
+def singular_value_spectrum(weight_matrix):
+    """计算 SVD 奇异值谱"""
+    weight_matrix = weight_matrix.float()  # 避免 float16 报错
+    U, S, V = torch.linalg.svd(weight_matrix.cpu(), full_matrices=False)
+    return S.numpy()
 
-# 计算 MLP 层的奇异值谱熵
-def svd_entropy(matrix):
-    """ 计算奇异值谱熵 (Singular Value Entropy) """
-    matrix = matrix.detach().cpu().numpy()
-    singular_values = np.linalg.svd(matrix, compute_uv=False)
-    singular_values = singular_values / np.sum(singular_values)  # 归一化
-    return entropy(singular_values)  # 计算熵
+def esd_spectrum(weight_matrix):
+    """计算特征值谱分布 (ESD)"""
+    weight_matrix = weight_matrix.float()  # 避免 float16 报错
+    eigenvalues = np.abs(np.linalg.eigvals((weight_matrix @ weight_matrix.T).cpu().detach().numpy()))
+    return eigenvalues
 
-# 存储层重要性
-layer_importance = {}
-
-def spectral_entropy(matrix):
-    """ 计算特征值谱熵 (Spectral Entropy) """
-    matrix = matrix.detach().cpu().numpy()
-    eigenvalues = np.abs(np.linalg.eigvals(matrix))
-    eigenvalues = eigenvalues / np.sum(eigenvalues)  # 归一化
-    return entropy(eigenvalues)  # 计算熵
-
-# 计算 MLP 层的奇异值谱熵
-def svd_entropy(matrix):
-    """ 计算奇异值谱熵 (Singular Value Entropy) """
-    matrix = matrix.detach().cpu().numpy()
-    singular_values = np.linalg.svd(matrix, compute_uv=False)
-    singular_values = singular_values / np.sum(singular_values)  # 归一化
-    return entropy(singular_values)  # 计算熵
-
-# 存储层重要性
-layer_importance = {}
+layer_importance_scores = {}
 
 for layer_idx, layer in enumerate(model.model.layers):
-    # 🧠 Attention 层计算
+    print(f"Processing Layer {layer_idx}...")
+
+    # 🧠 Attention 层
     q_proj = layer.self_attn.q_proj.weight
     k_proj = layer.self_attn.k_proj.weight
     v_proj = layer.self_attn.v_proj.weight
-    attn_entropy = (spectral_entropy(q_proj) + spectral_entropy(k_proj) + spectral_entropy(v_proj)) / 3
+    attn_score = np.mean([
+        np.sum(singular_value_spectrum(q_proj)), 
+        np.sum(singular_value_spectrum(k_proj)), 
+        np.sum(singular_value_spectrum(v_proj))
+    ])  # SVD 计算重要性
 
-    # 🔥 MLP 层计算（细分 Up / Down / Gate）
-    fc1 = layer.mlp.fc1.weight  # Up Projection
-    fc2 = layer.mlp.fc2.weight  # Down Projection
-    fc_gate = layer.mlp.gate_proj.weight  # Gate
+    # 🔥 MLP 层
+    gate_proj = layer.mlp.gate_proj.weight
+    up_proj = layer.mlp.up_proj.weight
+    down_proj = layer.mlp.down_proj.weight
+    mlp_score = np.mean([
+        np.sum(esd_spectrum(gate_proj)), 
+        np.sum(esd_spectrum(up_proj)), 
+        np.sum(esd_spectrum(down_proj))
+    ])  # ESD 计算重要性
 
-    fc1_entropy = svd_entropy(fc1)
-    fc2_entropy = svd_entropy(fc2)
-    gate_entropy = svd_entropy(fc_gate)
+    # 🎯 Output 层
+    output_proj = layer.self_attn.o_proj.weight
+    output_score = np.sum(singular_value_spectrum(output_proj))  # SVD 计算重要性
 
-    # MLP 归一化参数权重
-    num_params_fc1 = fc1.numel()
-    num_params_fc2 = fc2.numel()
-    num_params_gate = fc_gate.numel()
-    total_mlp_params = num_params_fc1 + num_params_fc2 + num_params_gate
+    # 📊 计算相对重要性
+    layer_relative_importance = attn_score + mlp_score + output_score
+    layer_importance_scores[layer_idx] = layer_relative_importance
 
-    fc1_weight = num_params_fc1 / total_mlp_params
-    fc2_weight = num_params_fc2 / total_mlp_params
-    gate_weight = num_params_gate / total_mlp_params
+# 🚀 排序
+sorted_layers = sorted(layer_importance_scores.items(), key=lambda x: x[1], reverse=True)
 
-    # 计算 MLP 层总重要性
-    mlp_entropy = fc1_weight * fc1_entropy + fc2_weight * fc2_entropy + gate_weight * gate_entropy
-
-    # 🏆 计算最终层重要性
-    num_params_attn = q_proj.numel() + k_proj.numel() + v_proj.numel()
-    total_params = num_params_attn + total_mlp_params
-
-    attn_weight = num_params_attn / total_params
-    mlp_weight = total_mlp_params / total_params
-    layer_score = attn_weight * attn_entropy + mlp_weight * mlp_entropy
-    layer_importance[layer_idx] = layer_score
-
-    print(layer_score)
-
-print("final: ")
-
-print(layer_score)
+print("\n🔝 LLaMA 7B 每层的相对重要性排序:")
+for idx, importance in sorted_layers:
+    print(f"Layer {idx}: {importance:.4f}")
