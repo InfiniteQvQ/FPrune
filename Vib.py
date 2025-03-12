@@ -48,7 +48,7 @@ def process_layer(layer_idx, layer):
 
     # 📊 计算相对重要性
     layer_relative_importance = (1 / attn_hill) + (1 / mlp_hill) + (1 / output_hill)
-
+    print(layer_relative_importance)
     return layer_idx, layer_relative_importance
 
 # 🚀 计算所有层的重要性
@@ -61,8 +61,8 @@ scores = torch.tensor([imp[1] for imp in layer_importance_scores])
 s1, s2 = 0.8, 1.2
 max_score, min_score = scores.max(), scores.min()
 normalized_scores = ((scores - min_score) / (max_score - min_score)) * (s2 - s1) + s1
-current_mean = normalized_scores.mean()
-normalized_scores = 0.7 + (normalized_scores - current_mean)
+
+normalized_scores = 0.71 * normalized_scores
 print(normalized_scores)
 print(normalized_scores.mean())
 print("\n🔝 LLaMA 7B 每层的归一化相对重要性:")
