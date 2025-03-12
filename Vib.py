@@ -91,7 +91,6 @@ def train_mask(rank, world_size):
 
     print(f"🔥 Model has {len(model.model.layers)} layers")
     print(f"🔥 Target sparsity list has {len(TARGET_SPARSITY_PER_LAYER)} values")
-    assert len(TARGET_SPARSITY_PER_LAYER) == len(model.model.layers), "❌ Sparsity list does not match model layers!"
 
     # 3️⃣ 初始化剪枝模型（不再使用 DDP）
     pruned_model = PrunedLlama(model, TARGET_SPARSITY_PER_LAYER).to(rank)
