@@ -983,8 +983,8 @@ def ww_sparsity_test_3b(args, model, device=torch.device("cuda:0"),
     new = []
     for  i in range(32):
         val = 0
-        val += metrics[i*7] + metrics[i*7+1] + metrics[i*7+2] + metrics[i*7+3] + metrics[i*7+6]
-        val /= 5
+        val += metrics[i*7] + metrics[i*7+1] + metrics[i*7+2] + metrics[i*7+3] 
+        val /= 4
         for j in range(7):
             new.append(val)
     metrics = np.array(new)
@@ -1000,9 +1000,39 @@ def ww_sparsity_test_3b(args, model, device=torch.device("cuda:0"),
     layerwise_pruning_ratios_esd = layerwise_pruning_ratios_esd.cpu().numpy().tolist()
     print("ESD-based ratios:", layerwise_pruning_ratios_esd)
 
-    c = np.array([0.6422998605725116, 0.6076189399018346, 0.6431607876843134, 0.632496724323861, 0.6492745908122345, 0.6395763173189879, 0.6320245356482128, 0.6078677480607045, 0.6042088234847027, 0.5937211887033444, 0.5913671175399616, 0.6029017255360666, 0.5969061450711586, 0.6176122089186092, 0.6287522793486514, 0.6820458808068837, 0.6490985780535579, 0.7088560497770334, 0.795709542416188, 0.7484479124161798, 0.7333678585773761, 0.7734621753589054, 0.7688289880157918, 0.7323775174207859, 0.8024475501162731, 0.8870506763099423, 0.8165164360081115, 0.8420071844374665, 0.7661457301597094, 0.8232196846982399, 0.8519287490237454, 0.7287004934786531])
-    
-    print(c)
+    segments = {
+        0: [0],
+        1: [1],
+        2: [2],
+        3: [3],
+        4: [4, 5, 6, 7, 8, 9, 10, 11],
+        5: [12, 13, 14],
+        6: [15, 16, 17],
+        7: [18, 19, 20],
+        8: [21, 22, 23],
+        9: [24, 25],
+        10: [26, 27],
+        11: [28, 29],
+        12: [30],
+        13: [31]
+    }
+
+
+    res = []
+    cur_pointer = 0
+    for seg, l in segments.items():
+        lens = len(l)
+        cur = 0
+        
+        for i in range(lens):
+            cur += layerwise_pruning_ratios_esd[cur_pointer * 7]
+            cur_pointer += 1
+        cur /= lens
+        for i in range(lens):
+            for j in range(7):
+                res.append(cur)
+    print(res)
+    return res
     a = []
     for i in c:
         for j in range(7):
