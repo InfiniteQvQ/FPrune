@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 from transformers import AutoModelForCausalLM
-
+import math
 # 🛠️ 加载 LLaMA-7B
 model = AutoModelForCausalLM.from_pretrained(
     "pinkmanlove/llama-7b-hf",
@@ -11,65 +11,84 @@ model = AutoModelForCausalLM.from_pretrained(
 )
 
 # 🎯 计算 PL_Alpha_Hill
-def pl_alpha_hill_peak(weight_matrix, bins=100):
+def pl_alpha_hill_peak(weight_matrix, bins=100, EVALS_THRESH=0.00001, conv_norm=0.5, filter_zeros=False):
     """
-    使用 'xmin_peak' 方法计算 PL_Alpha_Hill（alphahill）的值
-
-    参数：
-      weight_matrix: 权重矩阵（例如 layer.self_attn.q_proj.weight）
-      bins: 用于直方图的箱数（默认 100）
-
-    返回：
-      final_alphahat: 归一化后的 alphahill 数值
+    使用与 net_esd_estimator (fix_fingers='xmin_peak') 完全一致的方式计算 PL_Alpha_Hill（alphahill）的值。
+    
+    参数:
+      weight_matrix: 待计算的权重矩阵（例如 layer.self_attn.q_proj.weight）
+      bins: 直方图箱数，默认 100
+      EVALS_THRESH: 过滤近零特征值的阈值，默认 0.00001
+      conv_norm: 针对 Conv2d 层归一化因子，默认 0.5（注意如果传入的是 Linear 层权重，此参数可能不需要）
+      filter_zeros: 是否过滤小于阈值的特征值，默认 False
+      
+    返回:
+      final_alphahat: 归一化后的 alphahill 数值，计算方式为 final_alpha * log10(spectral_norm)
     """
     weight_matrix = weight_matrix.float()
+    
+    # 对于 pl_alpha_hill_peak，我们直接计算 weight_matrix @ weight_matrix.T 的特征值
     with torch.no_grad():
-        # 计算 matrix @ matrix.T 的特征值，得到实数特征值
-        eigvals = torch.linalg.eigvalsh(weight_matrix @ weight_matrix.T).cpu().numpy()
-
-    # 将特征值按升序排列
-    eigvals = np.sort(eigvals)
-
-    # 过滤掉零值并取对数，构造 log-scale 直方图
-    positive_eigs = eigvals[eigvals > 0]
-    if len(positive_eigs) == 0:
-        return 1.0  # 如果没有正特征值，返回默认值
-    log_nz_eigs = np.log10(positive_eigs)
-    min_e, max_e = log_nz_eigs.min(), log_nz_eigs.max()
-
-    # 构造直方图并选择直方图密度最大的箱对应的 xmin
-    counts, bin_edges = np.histogram(log_nz_eigs, bins=bins, range=(min_e, max_e))
-    peak_idx = np.argmax(counts)
-    xmin = 10 ** bin_edges[peak_idx]
-
-    # 设置 xmin 的限制范围，避免极端情况
-    xmin_min = 0.95 * xmin
-    xmin_max = 1.5 * xmin
-
-    # 筛选出处于 [xmin, xmin_max] 范围内的特征值
-    valid_eigs = eigvals[(eigvals >= xmin) & (eigvals <= xmin_max)]
-    n = len(valid_eigs)
-    if n < 2:
-        return 1.0  # 特征值太少时返回默认值
-
-    # 遍历不同候选 xmin 值，计算对应的 alpha 和拟合指标 D
-    alphas = []
-    Ds = []
-    for i, current_xmin in enumerate(valid_eigs[:-1]):
-        tail = valid_eigs[i:]
-        alpha = 1 + len(tail) / np.sum(np.log(tail / current_xmin))
-        alphas.append(alpha)
-        D = np.max(np.abs(1 - (tail / current_xmin) ** (-alpha + 1) - np.arange(len(tail)) / len(tail)))
-        Ds.append(D)
-
-    # 选择使 D 最小的 alpha
-    min_D_index = np.argmin(Ds)
-    final_alpha = alphas[min_D_index]
-
-    # 使用谱范数归一化得到最终 alphahill
-    spectral_norm = np.max(eigvals)
-    final_alphahat = final_alpha * np.log10(spectral_norm)
-
+        eigvals = torch.linalg.eigvalsh(weight_matrix @ weight_matrix.T).cpu()
+    
+    # 将特征值升序排列
+    eigvals, _ = torch.sort(eigvals, descending=False)
+    spectral_norm = eigvals[-1].item()      # 最大特征值
+    fnorm = torch.sum(eigvals).item()         # 所有特征值和（如需要）
+    
+    # 过滤接近零的特征值（如果设置了过滤）
+    if filter_zeros:
+        nz_eigs = eigvals[eigvals > EVALS_THRESH]
+        N = len(nz_eigs)
+        if N == 0:
+            nz_eigs = eigvals
+            N = len(nz_eigs)
+    else:
+        nz_eigs = eigvals
+        N = len(nz_eigs)
+    
+    # 计算对数（用于后续拟合计算）——注意：alpha计算用的是自然对数
+    log_nz_eigs = torch.log(nz_eigs)
+    
+    # 构造 log10 直方图，选择密度峰值对应的 xmin
+    hist_nz_eigs = torch.log10(nz_eigs)
+    min_e, max_e = hist_nz_eigs.min(), hist_nz_eigs.max()
+    counts = torch.histc(hist_nz_eigs, bins=bins, min=min_e, max=max_e)
+    boundaries = torch.linspace(min_e, max_e, bins + 1)
+    ih = torch.argmax(counts).item()
+    xmin2 = 10 ** boundaries[ih].item()
+    
+    # 设置 xmin 限制范围（注意：下界这里取的是 log10(0.95*xmin2)）
+    xmin_min = torch.log10(0.95 * xmin2)
+    xmin_max = 1.5 * xmin2
+    
+    # 遍历候选的 xmin 值，计算 alpha 及拟合指标 D
+    alphas = torch.zeros(N - 1)
+    Ds = torch.ones(N - 1)
+    for i, xmin in enumerate(nz_eigs[:-1]):
+        # 采用与 net_esd_estimator 中 'xmin_peak' 分支一致的过滤：
+        # 注意：这里直接比较原始值 xmin 与 xmin_max，而 xmin_min 为 log10 值，
+        # 原代码中即为：if xmin < xmin_min: continue
+        if xmin < xmin_min:
+            continue
+        if xmin > xmin_max:
+            break
+        
+        n = float(N - i)
+        seq = torch.arange(n, dtype=torch.float32)
+        # 计算 alpha = 1 + n / (sum(log(candidate_tail)) - n * log(candidate))
+        alpha = 1 + n / (torch.sum(log_nz_eigs[i:]) - n * log_nz_eigs[i])
+        alphas[i] = alpha
+        if alpha > 1:
+            D = torch.max(torch.abs(1 - (nz_eigs[i:] / xmin) ** (-alpha + 1) - seq / n))
+            Ds[i] = D
+    
+    min_D_index = torch.argmin(Ds).item()
+    final_alpha = alphas[min_D_index].item()
+    
+    # 使用谱范数的 log10 对 alpha 归一化，得到最终的 alphahill 值
+    final_alphahat = final_alpha * math.log10(spectral_norm)
+    
     return final_alphahat
 
 # 🎯 计算 ESD（最大特征值）
