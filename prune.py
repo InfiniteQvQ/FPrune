@@ -983,11 +983,12 @@ def ww_sparsity_test_3b(args, model, device=torch.device("cuda:0"),
     new = []
     for  i in range(32):
         val = 0
-        val += metrics[i*7 ] + metrics[i*7+3] + metrics[i*7+1]
-        val /= 3
+        val += metrics[i*7 ] + metrics[i*7+3] + metrics[i*7+1] + metrics[i*7 + 2]
+        val /= 4
         for j in range(7):
             new.append(val)
     metrics = np.array(new)
+    
 
     scores = torch.tensor(metrics, dtype=torch.float32)
     prunables_tensor = torch.tensor(prunables, dtype=torch.float32)
@@ -1002,17 +1003,17 @@ def ww_sparsity_test_3b(args, model, device=torch.device("cuda:0"),
     return layerwise_pruning_ratios_esd
     segments = {
         0: [0],
-        1: [1],
-        2: [2],
-        3: [3],
-        4: [4, 5, 6, 7, 8, 9, 10, 11],
-        5: [12, 13, 14],
-        6: [15, 16, 17],
-        7: [18, 19, 20],
+        1: [1, 2, 3, 4, 5, 6],
+        2: [7, 8, 9, 10, 11, 12],
+        3: [13, 14],
+        4: [15],
+        5: [16, 17, 18],
+        6: [19],
+        7: [20],
         8: [21, 22, 23],
-        9: [24, 25],
-        10: [26, 27],
-        11: [28, 29],
+        9: [24, 25, 26, 27],
+        10: [28],
+        11: [29],
         12: [30],
         13: [31]
     }
