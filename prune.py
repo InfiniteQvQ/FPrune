@@ -978,12 +978,16 @@ def ww_sparsity_test_3b(args, model, device=torch.device("cuda:0"),
     # 加载ESD指标
     metrics = np.load(f"{args.ww_metric_cache}/{args.ww_metric}.npy")
     #print("ESD raw metrics:", metrics)
-    if args.mapping_type == 'block_wise':
-        block_metrics = [np.mean(metrics[i:i+layer_num_in_block]) 
-                         for i in range(0, len(metrics), layer_num_in_block)]
-        metrics = [i for i in block_metrics for j in range(layer_num_in_block)]
+    
     #print("ESD metric values after block_wise processing:", metrics)
-  
+    new = []
+    for  i in range(32):
+        val = 0
+        val += metrics[i*7] + metrics[i*7+1] + metrics[i*7+2] + metrics[i*7+3]
+        val /= 4
+        for j in range(7):
+            new.append(j)
+    metrics = np.array(new)
 
     scores = torch.tensor(metrics, dtype=torch.float32)
     prunables_tensor = torch.tensor(prunables, dtype=torch.float32)
