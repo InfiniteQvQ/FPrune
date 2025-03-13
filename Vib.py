@@ -48,7 +48,7 @@ def compute_alpha_peak(weight_matrix, bins=100, EVALS_THRESH=1e-5, conv_norm=0.5
             nz_eigs = eigs
             N = nz_eigs.numel()
     else:
-        nz_eigs = eigs
+        nz_eigs = torch.clamp(eigs, min=EVALS_THRESH)
         N = nz_eigs.numel()
     
     # 计算自然对数，用于后续 alpha 计算
@@ -58,7 +58,7 @@ def compute_alpha_peak(weight_matrix, bins=100, EVALS_THRESH=1e-5, conv_norm=0.5
     hist_nz_eigs = torch.log10(nz_eigs)
     min_e, max_e = hist_nz_eigs.min(), hist_nz_eigs.max()
     counts = torch.histc(hist_nz_eigs, bins=bins, min=min_e.item(), max=max_e.item())
-    boundaries = torch.linspace(min_e, max_e, bins + 1)
+    boundaries = torch.linspace(min_e.item(), max_e.item(), bins + 1)
     ih = torch.argmax(counts).item()
     xmin2 = 10 ** boundaries[ih].item()
     
@@ -66,7 +66,7 @@ def compute_alpha_peak(weight_matrix, bins=100, EVALS_THRESH=1e-5, conv_norm=0.5
     xmin_min = torch.log10(torch.tensor(0.95 * xmin2))
     xmin_max = 1.5 * xmin2
     
-    # 遍历候选的 xmin 值，计算对应的 alpha 及拟合指标 D
+    # 遍历候选的 xmin 值，计算对应的 alpha 和拟合指标 D
     alphas = torch.zeros(N - 1)
     Ds = torch.ones(N - 1)
     for i, xmin in enumerate(nz_eigs[:-1]):
