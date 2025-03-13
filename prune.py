@@ -977,12 +977,12 @@ def ww_sparsity_test_3b(args, model, device=torch.device("cuda:0"),
     
     # 加载ESD指标
     metrics = np.load(f"{args.ww_metric_cache}/{args.ww_metric}.npy")
-    print("ESD raw metrics:", metrics)
+    #print("ESD raw metrics:", metrics)
     if args.mapping_type == 'block_wise':
         block_metrics = [np.mean(metrics[i:i+layer_num_in_block]) 
                          for i in range(0, len(metrics), layer_num_in_block)]
         metrics = [i for i in block_metrics for j in range(layer_num_in_block)]
-    print("ESD metric values after block_wise processing:", metrics)
+    #print("ESD metric values after block_wise processing:", metrics)
 
 
     scores = torch.tensor(metrics, dtype=torch.float32)
@@ -994,14 +994,9 @@ def ww_sparsity_test_3b(args, model, device=torch.device("cuda:0"),
     scaler = torch.sum(prunables_tensor) * args.sparsity_ratio / (torch.sum(prunables_tensor * layerwise_pruning_ratios_esd))
     layerwise_pruning_ratios_esd = layerwise_pruning_ratios_esd * scaler
     layerwise_pruning_ratios_esd = layerwise_pruning_ratios_esd.cpu().numpy().tolist()
-    print("ESD-based ratios:", layerwise_pruning_ratios_esd)
+    #print("ESD-based ratios:", layerwise_pruning_ratios_esd)
 
-    c = np.array([
-        0.5558, 0.6181, 0.6583, 0.6332, 0.6364, 0.6301, 0.6292, 0.6150, 
-        0.5941, 0.5721, 0.5895, 0.5906, 0.5860, 0.6044, 0.6113, 0.6779, 
-        0.6934, 0.7248, 0.7639, 0.7806, 0.8151, 0.8236, 0.7845, 0.7727, 
-        0.8204, 0.8336, 0.8326, 0.8084, 0.7881, 0.8316, 0.8147, 0.7102
-    ])
+    c = np.array([0.6949407704615811, 0.7055420287004895, 0.7070121876965457, 0.7278549174326383, 0.7168866342007681, 0.7072970340033229, 0.7129314701407107, 0.711642602727643, 0.7017563271296612, 0.704407612720013, 0.7084382469366128, 0.7015057864382312, 0.6940777216314713, 0.7003423300591318, 0.7064469240998559, 0.7089328752163528, 0.7036354824646018, 0.7061893148112401, 0.7100614331387086, 0.7139931885690736, 0.7160752118719278, 0.7172656985984457, 0.7251175475388195, 0.7262697360805394, 0.7289624949118884, 0.7280857184655618, 0.7275131508099678, 0.7214457202510703, 0.713590718503282, 0.6957752578867308, 0.4859749966079256, 0.570028859895186])
 
     print(c)
     a = []
