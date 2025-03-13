@@ -13,7 +13,7 @@ if __name__ == "__main__":
     metrics_array = np.array(metrics)
 
     # 3) 将结果保存为 npy 文件
-    save_path = "../data/llama-13b-hf/alpha_peak.npy"
+    save_path = "/root/autodl-tmp/alpha_peak.npy"
     np.save(save_path, metrics_array)
-
+    print(metrics)
     print(f"Saved alpha_peak metrics (shape={metrics_array.shape}) to {save_path}")
