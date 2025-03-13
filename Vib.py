@@ -48,7 +48,7 @@ def process_layer(layer_idx, layer, lambda_esd=1.0):
     attn_hill_sum = (
         pl_alpha_hill(layer.self_attn.q_proj.weight) +
         pl_alpha_hill(layer.self_attn.k_proj.weight) +
-        pl_alpha_hill(layer.self_attn.v_proj.weight) +
+        pl_alpha_hill(layer.self_attn.v_proj.weight) 
     )
     print("attn sum: ", np.log(1 + attn_hill_sum))
     # 📊 计算相对重要性 (ESD - Alpha-Hill)
