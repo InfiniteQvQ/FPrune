@@ -11,7 +11,7 @@ model = AutoModelForCausalLM.from_pretrained(
 )
 
 # 🎯 计算 PL_Alpha_Hill
-def pl_alpha_hill_peak(weight_matrix, bins=1000):
+def pl_alpha_hill_peak(weight_matrix, bins=100):
     """使用 'xmin_peak' 方法计算 PL_Alpha_Hill"""
     weight_matrix = weight_matrix.float()
     with torch.no_grad():
@@ -50,7 +50,10 @@ def process_layer(layer_idx, layer):
         pl_alpha_hill_peak(layer.self_attn.q_proj.weight) +
         pl_alpha_hill_peak(layer.self_attn.k_proj.weight) +
         pl_alpha_hill_peak(layer.self_attn.v_proj.weight) +
-        pl_alpha_hill_peak(layer.self_attn.o_proj.weight)
+        pl_alpha_hill_peak(layer.self_attn.o_proj.weight) + 
+        pl_alpha_hill_peak(layer.mlp.gate_proj.weight) + 
+        pl_alpha_hill_peak(layer.mlp.up_proj.weight) + 
+        pl_alpha_hill_peak(layer.mlp.down_proj.weight) 
     )
 
    
