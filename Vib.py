@@ -57,7 +57,7 @@ def process_layer(layer_idx, layer):
     )
 
    
-    print(attn_hill_sum)
+    print(attn_hill_sum/7)
     return layer_idx, attn_hill_sum
 
 
