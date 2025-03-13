@@ -10,47 +10,67 @@ model = AutoModelForCausalLM.from_pretrained(
     torch_dtype=torch.float16
 )
 
+# 🎯 计算 PL_Alpha_Hill
 def pl_alpha_hill_peak(weight_matrix, bins=100):
-    """使用 'xmin_peak' 方法计算 PL_Alpha_Hill"""
+    """
+    使用 'xmin_peak' 方法计算 PL_Alpha_Hill（alphahill）的值
+
+    参数：
+      weight_matrix: 权重矩阵（例如 layer.self_attn.q_proj.weight）
+      bins: 用于直方图的箱数（默认 100）
+
+    返回：
+      final_alphahat: 归一化后的 alphahill 数值
+    """
     weight_matrix = weight_matrix.float()
     with torch.no_grad():
+        # 计算 matrix @ matrix.T 的特征值，得到实数特征值
         eigvals = torch.linalg.eigvalsh(weight_matrix @ weight_matrix.T).cpu().numpy()
-    eigvals = np.sort(eigvals)  # 升序排列
 
-    # 计算 log-scale 直方图，找到最大密度点作为 xmin
-    log_nz_eigs = np.log10(eigvals[eigvals > 0])  # 过滤掉零值
+    # 将特征值按升序排列
+    eigvals = np.sort(eigvals)
+
+    # 过滤掉零值并取对数，构造 log-scale 直方图
+    positive_eigs = eigvals[eigvals > 0]
+    if len(positive_eigs) == 0:
+        return 1.0  # 如果没有正特征值，返回默认值
+    log_nz_eigs = np.log10(positive_eigs)
     min_e, max_e = log_nz_eigs.min(), log_nz_eigs.max()
-    counts, bin_edges = np.histogram(log_nz_eigs, bins=bins, range=(min_e, max_e))
-    peak_idx = np.argmax(counts)  # 找到峰值
-    xmin = 10 ** bin_edges[peak_idx]  # 还原回非 log 值
 
-    # 设定 xmin 限制范围，避免极端情况
-    xmin_min = 10 ** np.log10(0.95 * xmin)
+    # 构造直方图并选择直方图密度最大的箱对应的 xmin
+    counts, bin_edges = np.histogram(log_nz_eigs, bins=bins, range=(min_e, max_e))
+    peak_idx = np.argmax(counts)
+    xmin = 10 ** bin_edges[peak_idx]
+
+    # 设置 xmin 的限制范围，避免极端情况
+    xmin_min = 0.95 * xmin
     xmin_max = 1.5 * xmin
 
-    # 限制 eigvals 范围
+    # 筛选出处于 [xmin, xmin_max] 范围内的特征值
     valid_eigs = eigvals[(eigvals >= xmin) & (eigvals <= xmin_max)]
     n = len(valid_eigs)
-    if n < 2: return 1.0  # 避免除零错误
+    if n < 2:
+        return 1.0  # 特征值太少时返回默认值
 
-    # 遍历不同 xmin 选择最优 alpha
+    # 遍历不同候选 xmin 值，计算对应的 alpha 和拟合指标 D
     alphas = []
     Ds = []
-    for i, xmin in enumerate(valid_eigs[:-1]):
-        alpha = 1 + len(valid_eigs[i:]) / np.sum(np.log(valid_eigs[i:] / xmin))
+    for i, current_xmin in enumerate(valid_eigs[:-1]):
+        tail = valid_eigs[i:]
+        alpha = 1 + len(tail) / np.sum(np.log(tail / current_xmin))
         alphas.append(alpha)
-        D = np.max(np.abs(1 - (valid_eigs[i:] / xmin) ** (-alpha + 1) - np.arange(len(valid_eigs[i:])) / len(valid_eigs[i:])))
+        D = np.max(np.abs(1 - (tail / current_xmin) ** (-alpha + 1) - np.arange(len(tail)) / len(tail)))
         Ds.append(D)
 
-    min_D_index = np.argmin(Ds)  # 选择 D 最小的 alpha
+    # 选择使 D 最小的 alpha
+    min_D_index = np.argmin(Ds)
     final_alpha = alphas[min_D_index]
 
-    # 计算 spectral norm 归一化的 alpha
-    spectral_norm = np.max(eigvals)  # 获取谱范数
-    final_alphahat = final_alpha * np.log10(spectral_norm)  # 归一化
+    # 使用谱范数归一化得到最终 alphahill
+    spectral_norm = np.max(eigvals)
+    final_alphahat = final_alpha * np.log10(spectral_norm)
 
     return final_alphahat
-
 
 # 🎯 计算 ESD（最大特征值）
 def esd_spectrum(weight_matrix):
