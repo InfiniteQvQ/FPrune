@@ -55,9 +55,9 @@ def process_layer(layer_idx, layer):
         pl_alpha_hill_peak(layer.mlp.up_proj.weight) + 
         pl_alpha_hill_peak(layer.mlp.down_proj.weight) 
     )
-
+    
    
-    print(attn_hill_sum/7)
+    print(attn_hill_sum)
     return layer_idx, attn_hill_sum
 
 
