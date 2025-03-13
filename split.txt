@@ -2,8 +2,8 @@
 
 
 llama 7b
-magnitude_ww 192.69 
-wanda_ww 22.77 | 22.24 0.2 ww | 22.13 0.21 ww   
+magnitude_ww 192.69  
+wanda_ww 22.77 | 22.24 0.2 ww | 22.13 0.21 ww   | 24 GT
 sparsegpt 19.67 | 18.49 0.2 ww |  GT-19.326
 
 llama 2 7b
@@ -13,6 +13,7 @@ sparsegpt 20.99 0.2 ww | 21.51 GT
 
 
 llama 7b
-QKV output m 198.12 | QKV     | OUT     |V      |OUT V  |K      |Q      |Gate    |QK     |QK OUT |QKVoutg
-           w 22.01  | w 24.33 | w 51.33 |w 29.95|w 31.33|w 26.78|w 27.37|w 108.09|w 26.85|w 22.99|w 22.21
-           s 18.75  |         |         |       |       |       |       |        |       |       |
+QKV output m 198.12 | QKV     | OUT     |V      |OUT V  |K      |Q      |Gate    |QK     |QK OUT |QKVoutg|QKVout + split
+           w 22.01  | w 24.33 | w 51.33 |w 29.95|w 31.33|w 26.78|w 27.37|w 108.09|w 26.85|w 22.99|w 22.21|m 
+           s 18.75  |         |         |       |       |       |       |        |       |       |       |w 21.69
+                                                                                                         |s 17.76
