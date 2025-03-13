@@ -983,7 +983,7 @@ def ww_sparsity_test_3b(args, model, device=torch.device("cuda:0"),
     new = []
     for  i in range(32):
         val = 0
-        val += metrics[i*7 + 1]
+        val += metrics[i*7 ]
         val /= 1
         for j in range(7):
             new.append(val)
