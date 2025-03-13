@@ -28,15 +28,15 @@ def process_layer(layer_idx, layer):
         metric[layer_idx * 7]  + #Q
         metric[layer_idx * 7 + 1] + #K
         metric[layer_idx * 7 + 2] + #V
-        metric[layer_idx * 7 + 3]  #OUT 
+        metric[layer_idx * 7 + 3]   #OUT 
         #metric[layer_idx * 7 + 4] + #GATE
         #metric[layer_idx * 7 + 5] +  #UP
         #metric[layer_idx * 7 + 6]  #DOWN
     )
     
    
-    print(attn_hill_sum)
-    return layer_idx, attn_hill_sum
+    print(attn_hill_sum/4)
+    return layer_idx, attn_hill_sum/4
 
 
 # 🚀 计算所有层的重要性
