@@ -38,11 +38,11 @@ def process_layer(layer_idx, layer, lambda_esd=1.0):
     print(f"Processing Layer {layer_idx}...")
 
     # 🔥 MLP 层（Gate, Up, Down）- 计算 ESD
-    mlp_esd = np.mean([
-        esd_spectrum(layer.mlp.gate_proj.weight),
-        esd_spectrum(layer.mlp.up_proj.weight),
+    mlp_esd = (
+        esd_spectrum(layer.mlp.gate_proj.weight)+
+        esd_spectrum(layer.mlp.up_proj.weight)+
         esd_spectrum(layer.mlp.down_proj.weight)
-    ])
+    )
 
     # 🧠 Q, K, V, Output 层（计算 Alpha-Hill 之和）
     attn_hill_sum = (
@@ -57,7 +57,7 @@ def process_layer(layer_idx, layer, lambda_esd=1.0):
     return layer_idx, layer_relative_importance
 
 # 🚀 计算所有层的重要性
-lambda_esd = 0.5  # 可以调整这个参数
+lambda_esd = 1  # 可以调整这个参数
 layer_importance_scores = [process_layer(idx, layer, lambda_esd) for idx, layer in enumerate(model.model.layers)]
 
 # 🚀 归一化
