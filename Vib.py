@@ -57,7 +57,7 @@ def process_layer(layer_idx, layer, lambda_esd=1.0):
     return layer_idx, layer_relative_importance
 
 # 🚀 计算所有层的重要性
-lambda_esd = 1  # 可以调整这个参数
+lambda_esd = 0.3  # 可以调整这个参数
 layer_importance_scores = [process_layer(idx, layer, lambda_esd) for idx, layer in enumerate(model.model.layers)]
 
 # 🚀 归一化
