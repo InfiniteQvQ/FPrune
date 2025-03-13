@@ -983,7 +983,7 @@ def ww_sparsity_test_3b(args, model, device=torch.device("cuda:0"),
                          for i in range(0, len(metrics), layer_num_in_block)]
         metrics = [i for i in block_metrics for j in range(layer_num_in_block)]
     #print("ESD metric values after block_wise processing:", metrics)
-
+  
 
     scores = torch.tensor(metrics, dtype=torch.float32)
     prunables_tensor = torch.tensor(prunables, dtype=torch.float32)
@@ -1003,7 +1003,7 @@ def ww_sparsity_test_3b(args, model, device=torch.device("cuda:0"),
     for i in c:
         for j in range(7):
             a.append(i)
-    return a
+    return layerwise_pruning_ratios_esd
     if "opt" in args.model:
         blocks = model.model.decoder.layers    
     else:
