@@ -55,7 +55,7 @@ def process_layer(layer_idx, layer):
 
     # 📊 计算 log 归一化后的重要性
     layer_relative_importance = np.log(1 + attn_hill_sum)
-    print(layer_importance_scores)
+    print(layer_relative_importance)
     return layer_idx, layer_relative_importance
 
 
