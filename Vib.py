@@ -11,18 +11,26 @@ model = AutoModelForCausalLM.from_pretrained(
 )
 
 # 🎯 计算 PL_Alpha_Hill
-def pl_alpha_hill(weight_matrix, k_ratio=0.1):
-    """计算 Hill 估计的 PL_Alpha_Hill"""
+def pl_alpha_hill_peak(weight_matrix, bins=100):
+    """使用 'xmin_peak' 方法计算 PL_Alpha_Hill"""
     weight_matrix = weight_matrix.float()
     with torch.no_grad():
         eigvals = torch.linalg.eigvalsh(weight_matrix @ weight_matrix.T).cpu().numpy()
-    eigvals = np.sort(eigvals)[::-1]  # 降序排列
-    n = len(eigvals)
-    k = int(k_ratio * n)  # 取前 k% 计算
-    if k < 1: return 1.0
-    lambda_n_k = eigvals[k-1]
-    log_ratio = np.log(eigvals[:k]) - np.log(lambda_n_k)
-    alpha_hill = 1 + k / np.sum(log_ratio)
+    eigvals = np.sort(eigvals)  # 升序排列
+
+    # 计算 log-scale 直方图，找到最大密度点作为 xmin
+    log_nz_eigs = np.log10(eigvals[eigvals > 0])  # 过滤掉零值
+    min_e, max_e = log_nz_eigs.min(), log_nz_eigs.max()
+    counts, bin_edges = np.histogram(log_nz_eigs, bins=bins, range=(min_e, max_e))
+    peak_idx = np.argmax(counts)  # 找到峰值
+    xmin = 10 ** bin_edges[peak_idx]  # 还原回非 log 值
+
+    # 计算 Hill 估计值
+    valid_eigs = eigvals[eigvals >= xmin]
+    n = len(valid_eigs)
+    if n < 2: return 1.0  # 避免除零错误
+    alpha_hill = 1 + n / (np.sum(np.log(valid_eigs / xmin)))
+
     return alpha_hill
 
 # 🎯 计算 ESD（最大特征值）
@@ -34,30 +42,22 @@ def esd_spectrum(weight_matrix):
     return eigvals.max().cpu().numpy()  # 返回最大特征值
 
 # 🎯 计算单层重要性
-def process_layer(layer_idx, layer, lambda_esd=1.0):
+def process_layer(layer_idx, layer):
     print(f"Processing Layer {layer_idx}...")
 
-    # 🔥 MLP 层（Gate, Up, Down）- 计算 ESD
-    mlp_esd = (
-        esd_spectrum(layer.mlp.gate_proj.weight)+
-        esd_spectrum(layer.mlp.up_proj.weight)+
-        esd_spectrum(layer.mlp.down_proj.weight)
+    # 🧠 计算 Q, K, V, O 层的 Alpha-Hill 之和
+    attn_hill_sum = (
+        pl_alpha_hill_peak(layer.self_attn.q_proj.weight) +
+        pl_alpha_hill_peak(layer.self_attn.k_proj.weight) +
+        pl_alpha_hill_peak(layer.self_attn.v_proj.weight) +
+        pl_alpha_hill_peak(layer.self_attn.o_proj.weight)
     )
 
-    # 🧠 Q, K, V, Output 层（计算 Alpha-Hill 之和）
-    attn_hill_sum = (
-        pl_alpha_hill(layer.self_attn.q_proj.weight) +
-        pl_alpha_hill(layer.self_attn.k_proj.weight) +
-        pl_alpha_hill(layer.self_attn.v_proj.weight) +
-        pl_alpha_hill(layer.self_attn.o_proj.weight) + 
-        pl_alpha_hill(layer.mlp.gate_proj.weight) + 
-        pl_alpha_hill(layer.mlp.up_proj.weight) +
-        pl_alpha_hill(layer.mlp.down_proj.weight)
-    )
-    print("attn sum: ", np.log(1 + attn_hill_sum), " mlp  ", np.log(1 + mlp_esd))
-    # 📊 计算相对重要性 (ESD - Alpha-Hill)
-    layer_relative_importance =  np.log(1 + attn_hill_sum)
+    # 📊 计算 log 归一化后的重要性
+    layer_relative_importance = np.log(1 + attn_hill_sum)
+    print(layer_importance_scores)
     return layer_idx, layer_relative_importance
+
 
 # 🚀 计算所有层的重要性
 lambda_esd = 1  # 可以调整这个参数
