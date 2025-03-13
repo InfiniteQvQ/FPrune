@@ -69,8 +69,12 @@ normalized_scores = ((scores - min_score) / (max_score - min_score)) * (s2 - s1)
 # 调整均值到 0.7
 scale = 0.7 / normalized_scores.mean()
 normalized_scores = normalized_scores * scale
-
+print(normalized_scores.mean())
 # 打印最终结果
 print("\n🔝 LLaMA 7B 每层的归一化相对重要性:")
+res = []
 for (idx, _), importance in zip(layer_importance_scores, normalized_scores.tolist()):
     print(f"Layer {idx}: {importance:.4f}")
+    res.append(importance)
+print(res)
+
