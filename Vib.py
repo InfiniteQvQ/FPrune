@@ -61,7 +61,7 @@ def process_layer(layer_idx, layer):
 
 # 🚀 计算所有层的重要性
 lambda_esd = 1  # 可以调整这个参数
-layer_importance_scores = [process_layer(idx, layer, lambda_esd) for idx, layer in enumerate(model.model.layers)]
+layer_importance_scores = [process_layer(idx, layer) for idx, layer in enumerate(model.model.layers)]
 
 # 🚀 归一化
 scores = torch.tensor([imp[1] for imp in layer_importance_scores])
