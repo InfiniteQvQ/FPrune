@@ -38,19 +38,23 @@ def process_layer(layer_idx, layer, lambda_esd=1.0):
     print(f"Processing Layer {layer_idx}...")
 
     # 🔥 MLP 层（Gate, Up, Down）- 计算 ESD
-    #mlp_esd = (
-        #esd_spectrum(layer.mlp.gate_proj.weight)+
-        #esd_spectrum(layer.mlp.up_proj.weight)+
-        #esd_spectrum(layer.mlp.down_proj.weight)
-    #)
+    mlp_esd = (
+        esd_spectrum(layer.mlp.gate_proj.weight)+
+        esd_spectrum(layer.mlp.up_proj.weight)+
+        esd_spectrum(layer.mlp.down_proj.weight)
+    )
 
     # 🧠 Q, K, V, Output 层（计算 Alpha-Hill 之和）
     attn_hill_sum = (
         pl_alpha_hill(layer.self_attn.q_proj.weight) +
         pl_alpha_hill(layer.self_attn.k_proj.weight) +
-        pl_alpha_hill(layer.self_attn.v_proj.weight) 
+        pl_alpha_hill(layer.self_attn.v_proj.weight) +
+        pl_alpha_hill(layer.self_attn.o_proj.weight) + 
+        pl_alpha_hill(layer.mlp.gate_proj.weight) + 
+        pl_alpha_hill(layer.mlp.up_proj.weight) +
+        pl_alpha_hill(layer.mlp.down_proj.weight)
     )
-    print("attn sum: ", np.log(1 + attn_hill_sum))
+    print("attn sum: ", np.log(1 + attn_hill_sum), " mlp  ", np.log(1 + mlp_esd))
     # 📊 计算相对重要性 (ESD - Alpha-Hill)
     layer_relative_importance =  np.log(1 + attn_hill_sum)
     return layer_idx, layer_relative_importance
