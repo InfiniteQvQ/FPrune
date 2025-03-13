@@ -11,64 +11,69 @@ model = AutoModelForCausalLM.from_pretrained(
 )
 
 # 🎯 计算 PL_Alpha_Hill
-def pl_alpha_hill_peak(weight_matrix, bins=100, EVALS_THRESH=0.00001, conv_norm=0.5, filter_zeros=False):
+def pl_alpha_hill_peak(weight_matrix, bins=100, EVALS_THRESH=1e-5, conv_norm=0.5, filter_zeros=False):
     """
-    使用与 net_esd_estimator (fix_fingers='xmin_peak') 完全一致的方式计算 PL_Alpha_Hill（alphahill）的值。
+    使用与 net_esd_estimator (fix_fingers='xmin_peak') 一致的方式计算 PL_Alpha_Hill（alphahill）的值。
     
     参数:
       weight_matrix: 待计算的权重矩阵（例如 layer.self_attn.q_proj.weight）
       bins: 直方图箱数，默认 100
-      EVALS_THRESH: 过滤近零特征值的阈值，默认 0.00001
-      conv_norm: 针对 Conv2d 层归一化因子，默认 0.5（注意如果传入的是 Linear 层权重，此参数可能不需要）
-      filter_zeros: 是否过滤小于阈值的特征值，默认 False
-      
+      EVALS_THRESH: 过滤近零或负特征值的阈值，默认 1e-5
+      conv_norm: 针对 Conv2d 层归一化因子，默认 0.5（对于 Linear 层可忽略）
+      filter_zeros: 是否仅保留大于阈值的特征值，默认 False；
+                    当 False 时，将所有小于阈值的值替换为阈值，避免 log 运算出错。
+                    
     返回:
-      final_alphahat: 归一化后的 alphahill 数值，计算方式为 final_alpha * log10(spectral_norm)
+      final_alphahat: 归一化后的 alphahill 数值，其计算方式为 final_alpha * log10(spectral_norm)
     """
     weight_matrix = weight_matrix.float()
     
-    # 对于 pl_alpha_hill_peak，我们直接计算 weight_matrix @ weight_matrix.T 的特征值
     with torch.no_grad():
         eigvals = torch.linalg.eigvalsh(weight_matrix @ weight_matrix.T).cpu()
     
-    # 将特征值升序排列
+    # 对特征值按升序排序
     eigvals, _ = torch.sort(eigvals, descending=False)
-    spectral_norm = eigvals[-1].item()      # 最大特征值
-    fnorm = torch.sum(eigvals).item()         # 所有特征值和（如需要）
+    spectral_norm = eigvals[-1].item()  # 最大特征值
+    fnorm = torch.sum(eigvals).item()
     
-    # 过滤接近零的特征值（如果设置了过滤）
+    # 处理特征值，防止取对数时出现非有限数值
     if filter_zeros:
         nz_eigs = eigvals[eigvals > EVALS_THRESH]
-        N = len(nz_eigs)
-        if N == 0:
+        if nz_eigs.numel() == 0:
             nz_eigs = eigvals
-            N = len(nz_eigs)
     else:
-        nz_eigs = eigvals
-        N = len(nz_eigs)
+        # 将所有小于 EVALS_THRESH 的值替换为 EVALS_THRESH，防止出现 0 或负数
+        nz_eigs = torch.clamp(eigvals, min=EVALS_THRESH)
+    N = nz_eigs.numel()
     
-    # 计算对数（用于后续拟合计算）——注意：alpha计算用的是自然对数
+    # 计算自然对数和 log10（用于直方图）
     log_nz_eigs = torch.log(nz_eigs)
-    
-    # 构造 log10 直方图，选择密度峰值对应的 xmin
     hist_nz_eigs = torch.log10(nz_eigs)
+    
+    # 检查对数结果是否有效
+    if not torch.isfinite(hist_nz_eigs).all():
+        raise ValueError("log10(eigvals) 包含非有限值，请检查特征值处理逻辑。")
+    
     min_e, max_e = hist_nz_eigs.min(), hist_nz_eigs.max()
-    counts = torch.histc(hist_nz_eigs, bins=bins, min=min_e, max=max_e)
+    if not (torch.isfinite(min_e) and torch.isfinite(max_e)):
+        raise ValueError("计算出的 log10(eigvals) 的最小值或最大值为非有限值。")
+    
+    # 构造直方图，选择直方图密度最大的箱对应的 xmin2
+    counts = torch.histc(hist_nz_eigs, bins=bins, min=min_e.item(), max=max_e.item())
     boundaries = torch.linspace(min_e, max_e, bins + 1)
     ih = torch.argmax(counts).item()
     xmin2 = 10 ** boundaries[ih].item()
     
-    # 设置 xmin 限制范围（注意：下界这里取的是 log10(0.95*xmin2)）
+    # 设置 xmin 限制范围：xmin_min 为 log10(0.95*xmin2)，xmin_max 为 1.5*xmin2
     xmin_min = torch.log10(0.95 * xmin2)
     xmin_max = 1.5 * xmin2
     
     # 遍历候选的 xmin 值，计算 alpha 及拟合指标 D
     alphas = torch.zeros(N - 1)
     Ds = torch.ones(N - 1)
+    
     for i, xmin in enumerate(nz_eigs[:-1]):
-        # 采用与 net_esd_estimator 中 'xmin_peak' 分支一致的过滤：
-        # 注意：这里直接比较原始值 xmin 与 xmin_max，而 xmin_min 为 log10 值，
-        # 原代码中即为：if xmin < xmin_min: continue
+        # 与原实现一致，使用 xmin_peak 筛选候选 xmin
         if xmin < xmin_min:
             continue
         if xmin > xmin_max:
@@ -86,7 +91,7 @@ def pl_alpha_hill_peak(weight_matrix, bins=100, EVALS_THRESH=0.00001, conv_norm=
     min_D_index = torch.argmin(Ds).item()
     final_alpha = alphas[min_D_index].item()
     
-    # 使用谱范数的 log10 对 alpha 归一化，得到最终的 alphahill 值
+    # 用谱范数的 log10 对 alpha 归一化，得到最终的 alphahill
     final_alphahat = final_alpha * math.log10(spectral_norm)
     
     return final_alphahat
