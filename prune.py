@@ -994,16 +994,16 @@ def ww_sparsity_test_3b(args, model, device=torch.device("cuda:0"),
     scaler = torch.sum(prunables_tensor) * args.sparsity_ratio / (torch.sum(prunables_tensor * layerwise_pruning_ratios_esd))
     layerwise_pruning_ratios_esd = layerwise_pruning_ratios_esd * scaler
     layerwise_pruning_ratios_esd = layerwise_pruning_ratios_esd.cpu().numpy().tolist()
-    #print("ESD-based ratios:", layerwise_pruning_ratios_esd)
+    print("ESD-based ratios:", layerwise_pruning_ratios_esd)
 
     c = np.array([0.5783590591830463, 0.6127333634303123, 0.6479982472818272, 0.6386535239669239, 0.6473363987296012, 0.658916610094818, 0.6327550050837657, 0.6101516979062344, 0.6005448424402738, 0.5781835034021799, 0.5840887921100445, 0.5884827720006689, 0.6080901830047972, 0.6212637469459744, 0.6333045216757169, 0.6754845385423248, 0.6591642338162189, 0.7106400316852961, 0.791293710034947, 0.7395760720334317, 0.7358841523482734, 0.8052624214532393, 0.7759865225222986, 0.769509665107625, 0.7905975439699428, 0.86727525510327, 0.8087788842720306, 0.8341285525243263, 0.7882856910168723, 0.852951731557269, 0.843953072255381, 0.710365654501068])
-
+    
     print(c)
     a = []
     for i in c:
         for j in range(7):
             a.append(i)
-    return a
+    return layerwise_pruning_ratios_esd
     if "opt" in args.model:
         blocks = model.model.decoder.layers    
     else:
