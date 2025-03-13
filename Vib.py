@@ -10,7 +10,6 @@ model = AutoModelForCausalLM.from_pretrained(
     torch_dtype=torch.float16
 )
 
-# 🎯 计算 PL_Alpha_Hill
 def pl_alpha_hill_peak(weight_matrix, bins=100):
     """使用 'xmin_peak' 方法计算 PL_Alpha_Hill"""
     weight_matrix = weight_matrix.float()
@@ -25,13 +24,33 @@ def pl_alpha_hill_peak(weight_matrix, bins=100):
     peak_idx = np.argmax(counts)  # 找到峰值
     xmin = 10 ** bin_edges[peak_idx]  # 还原回非 log 值
 
-    # 计算 Hill 估计值
-    valid_eigs = eigvals[eigvals >= xmin]
+    # 设定 xmin 限制范围，避免极端情况
+    xmin_min = 10 ** np.log10(0.95 * xmin)
+    xmin_max = 1.5 * xmin
+
+    # 限制 eigvals 范围
+    valid_eigs = eigvals[(eigvals >= xmin) & (eigvals <= xmin_max)]
     n = len(valid_eigs)
     if n < 2: return 1.0  # 避免除零错误
-    alpha_hill = 1 + n / (np.sum(np.log(valid_eigs / xmin)))
 
-    return alpha_hill
+    # 遍历不同 xmin 选择最优 alpha
+    alphas = []
+    Ds = []
+    for i, xmin in enumerate(valid_eigs[:-1]):
+        alpha = 1 + len(valid_eigs[i:]) / np.sum(np.log(valid_eigs[i:] / xmin))
+        alphas.append(alpha)
+        D = np.max(np.abs(1 - (valid_eigs[i:] / xmin) ** (-alpha + 1) - np.arange(len(valid_eigs[i:])) / len(valid_eigs[i:])))
+        Ds.append(D)
+
+    min_D_index = np.argmin(Ds)  # 选择 D 最小的 alpha
+    final_alpha = alphas[min_D_index]
+
+    # 计算 spectral norm 归一化的 alpha
+    spectral_norm = np.max(eigvals)  # 获取谱范数
+    final_alphahat = final_alpha * np.log10(spectral_norm)  # 归一化
+
+    return final_alphahat
+
 
 # 🎯 计算 ESD（最大特征值）
 def esd_spectrum(weight_matrix):
