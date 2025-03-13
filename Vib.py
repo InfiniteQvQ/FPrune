@@ -44,20 +44,20 @@ def process_layer(layer_idx, layer, lambda_esd=1.0):
         esd_spectrum(layer.mlp.down_proj.weight)
     ])
 
-    # 🧠 Q, K, V, Output 层（计算 Alpha-Hill）
-    attn_hill = np.mean([
-        pl_alpha_hill(layer.self_attn.q_proj.weight),
-        pl_alpha_hill(layer.self_attn.k_proj.weight),
-        pl_alpha_hill(layer.self_attn.v_proj.weight),
+    # 🧠 Q, K, V, Output 层（计算 Alpha-Hill 之和）
+    attn_hill_sum = (
+        pl_alpha_hill(layer.self_attn.q_proj.weight) +
+        pl_alpha_hill(layer.self_attn.k_proj.weight) +
+        pl_alpha_hill(layer.self_attn.v_proj.weight) +
         pl_alpha_hill(layer.self_attn.o_proj.weight)
-    ])
+    )
 
     # 📊 计算相对重要性 (ESD - Alpha-Hill)
-    layer_relative_importance =  attn_hill - lambda_esd * mlp_esd
+    layer_relative_importance =  attn_hill_sum - lambda_esd * mlp_esd 
     return layer_idx, layer_relative_importance
 
 # 🚀 计算所有层的重要性
-lambda_esd = 1.0  # 可以调整这个参数
+lambda_esd = 0.5  # 可以调整这个参数
 layer_importance_scores = [process_layer(idx, layer, lambda_esd) for idx, layer in enumerate(model.model.layers)]
 
 # 🚀 归一化
@@ -71,9 +71,6 @@ scale = 0.7 / normalized_scores.mean()
 normalized_scores = normalized_scores * scale
 
 # 打印最终结果
-res = []
 print("\n🔝 LLaMA 7B 每层的归一化相对重要性:")
 for (idx, _), importance in zip(layer_importance_scores, normalized_scores.tolist()):
     print(f"Layer {idx}: {importance:.4f}")
-    res.append(importance)
-print(res)
