@@ -51,13 +51,13 @@ def process_layer(layer_idx, layer, lambda_esd=1.0):
         pl_alpha_hill(layer.self_attn.v_proj.weight) +
         pl_alpha_hill(layer.self_attn.o_proj.weight)
     )
-    print("attn sum: ", attn_hill_sum, " mlp  ", mlp_esd)
+    print("attn sum: ", np.log(1 + attn_hill_sum), " mlp  ", np.log(1 + mlp_esd))
     # 📊 计算相对重要性 (ESD - Alpha-Hill)
-    layer_relative_importance =  attn_hill_sum - lambda_esd * mlp_esd 
+    layer_relative_importance =  np.log(1 + attn_hill_sum) - lambda_esd * np.log(1 + mlp_esd)
     return layer_idx, layer_relative_importance
 
 # 🚀 计算所有层的重要性
-lambda_esd = 2  # 可以调整这个参数
+lambda_esd = 1  # 可以调整这个参数
 layer_importance_scores = [process_layer(idx, layer, lambda_esd) for idx, layer in enumerate(model.model.layers)]
 
 # 🚀 归一化
