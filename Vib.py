@@ -53,10 +53,9 @@ def process_layer(layer_idx, layer):
         pl_alpha_hill_peak(layer.self_attn.o_proj.weight)
     )
 
-    # 📊 计算 log 归一化后的重要性
-    layer_relative_importance = np.log(1 + attn_hill_sum)
-    print(layer_relative_importance)
-    return layer_idx, layer_relative_importance
+   
+    print(attn_hill_sum)
+    return layer_idx, attn_hill_sum
 
 
 # 🚀 计算所有层的重要性
