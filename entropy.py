@@ -6,7 +6,7 @@ from transformers import AutoModelForCausalLM
 # 🎯 计算 Spectral Entropy（衡量信息密度）
 def compute_spectral_entropy(weight_matrix):
     """计算谱熵（信息分布的均匀性）"""
-    eigs = torch.linalg.svdvals(weight_matrix).pow(2)
+    eigs = torch.linalg.svdvals(weight_matrix.float()).pow(2)  # 确保计算时是 float32
     eigs = eigs / eigs.sum()
     entropy = -torch.sum(eigs * torch.log(eigs + 1e-9))
     return entropy.item()
@@ -14,15 +14,15 @@ def compute_spectral_entropy(weight_matrix):
 # 🎯 计算 Rank（衡量权重矩阵的独立性）
 def compute_rank(weight_matrix, threshold=1e-5):
     """计算权重矩阵的 Rank（非零奇异值个数）"""
-    singular_values = torch.linalg.svdvals(weight_matrix)
+    singular_values = torch.linalg.svdvals(weight_matrix.float())
     rank = (singular_values > threshold).sum().item()
     return rank / weight_matrix.shape[1]  # 归一化 Rank
 
 # 🎯 计算 QK Entropy（衡量 Q/K 影响）
 def compute_qk_entropy(layer):
     """计算 QK 矩阵的谱熵"""
-    q_weight = layer.self_attn.q_proj.weight.cpu()
-    k_weight = layer.self_attn.k_proj.weight.cpu()
+    q_weight = layer.self_attn.q_proj.weight.cpu().float()  # 确保转换为 float32
+    k_weight = layer.self_attn.k_proj.weight.cpu().float()  # 确保转换为 float32
     qk_matrix = q_weight @ k_weight.T  # 计算 QK 相关性
     return compute_spectral_entropy(qk_matrix)
 
@@ -33,7 +33,7 @@ def process_model(model_name, model_path):
         model_path,
         cache_dir="/root/autodl-tmp/llm_weights",
         device_map="auto",
-        torch_dtype=torch.float16
+        torch_dtype=torch.float16  # 仍然使用 float16 进行加载
     )
 
     # 🎯 计算所有层的 V Entropy、V Rank、QK Entropy
@@ -42,7 +42,7 @@ def process_model(model_name, model_path):
     for idx, layer in enumerate(model.model.layers):
         print(f"Processing Layer {idx}...")
         
-        v_weight = layer.self_attn.v_proj.weight.float().cpu()
+        v_weight = layer.self_attn.v_proj.weight.cpu().float()  # 确保转换为 float32
         v_entropy.append(compute_spectral_entropy(v_weight))
         v_rank.append(compute_rank(v_weight))
 
