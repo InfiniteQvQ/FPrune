@@ -19,6 +19,8 @@ QKV output m 198.12 | QKV     | OUT     |V      |OUT V  |K      |Q      |Q OUT G
                                                                                                                      |s 17.76
 
 
+LLaMA 2 (7B) V Entropy (Avg): 7.6507
+LLaMA 7B V Entropy (Avg): 7.6593
 
 llama 3 8b
 
@@ -29,7 +31,7 @@ GT    |QKVout  |QKV      |Q out   |Q out Gate |Q out split |Q out gate split|
 
 
 llama 2 7b
-GT      |QKVout  |QK out  |Q out   |Q out gate|
-m nan   |        |        |        |          |
-w 31.94 |w 32.93 |w 29.89 |w 31.47 |w  33.91  |
-s 21.51 |        |        |        |          |
+GT      |QKVout  |QK out  |Q out   |Q out gate|QK out split | QK out split 7b
+m nan   |        |        |        |          |             |
+w 31.94 |w 32.93 |w 29.89 |w 31.47 |w  33.91  |w 30.00      | 29.39
+s 21.51 |        |        |        |          |             |
