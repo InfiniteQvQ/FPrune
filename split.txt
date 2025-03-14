@@ -22,7 +22,7 @@ QKV output m 198.12 | QKV     | OUT     |V      |OUT V  |K      |Q      |Gate   
 
 llama 3 8b
 
-QKVout  |QKV      |Q out
-m       |m        |m
-w 110.9 |w 115.22 |w 82.50
-s       |s        |s
+QKVout  |QKV      |Q out   |Q out Gate
+m       |m        |m       |m
+w 110.9 |w 115.22 |w 82.50 |w 76.65
+s       |s        |s       |s
