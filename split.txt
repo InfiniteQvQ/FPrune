@@ -21,6 +21,10 @@ QKV output m 198.12 | QKV     | OUT     |V      |OUT V  |K      |Q      |Q OUT G
 
 LLaMA 2 (7B) V Entropy (Avg): 7.6507
 LLaMA 7B V Entropy (Avg): 7.6593
+LLaMA 2 (7B) V Rank (Avg): 1.0000
+LLaMA 7B V Rank (Avg): 1.0000
+LLaMA 2 (7B) QK Entropy (Avg): 4.3091
+LLaMA 7B QK Entropy (Avg): 3.9172
 
 llama 3 8b
 

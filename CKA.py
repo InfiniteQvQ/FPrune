@@ -130,7 +130,7 @@ class SGLPPruner:
         print("[Init] Loading tokenizer:", model_name)
         # 你可以根据实际情况换成适合自己模型的 tokenizer
         tokenizer_name = "meta-llama/Meta-Llama-3-8B"
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.tokenizer = AutoTokenizer.from_pretrained("HuggingFaceM4/llama-7b-tokenizer")
 
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -420,7 +420,8 @@ if __name__ == "__main__":
 
     print(cka_mat)
     print("[Main] Auto-selecting num_segments with KMeans ...")
-    num_segments = auto_select_k(cka_mat)
+    #num_segments = auto_select_k(cka_mat)
+    num_segments = 18
     print(f"[Main] Auto-selected num_segments = {num_segments}")
 
     print("[Main] Doing Fisher Optimal Segmentation ...")
@@ -429,17 +430,17 @@ if __name__ == "__main__":
     for sid, ls in segments.items():
         print(f"  seg_id={sid}, layers={ls}")
 
-    if not args.no_visual:
-        pruner.visualize(cka_mat, segments)
+    #if not args.no_visual:
+        #pruner.visualize(cka_mat, segments)
 
-    print("[Main] Compute GradNorm for each segment (using real text input if possible) ...")
-    seg_scores = pruner.compute_segment_scores2(segments, num_samples=8, seq_len=128)
+    #print("[Main] Compute GradNorm for each segment (using real text input if possible) ...")
+    #seg_scores = pruner.compute_segment_scores2(segments, num_samples=8, seq_len=128)
 
-    print("[Segment Importance Scores]")
-    for sid, score in seg_scores.items():
-        print(f"Segment {sid}: importance={score:.4f}")
+    #print("[Segment Importance Scores]")
+    #for sid, score in seg_scores.items():
+     #   print(f"Segment {sid}: importance={score:.4f}")
 
-    print(f"[Main] Pruning ratio = {args.prune_ratio}")
+    #print(f"[Main] Pruning ratio = {args.prune_ratio}")
     # 如果要执行真实剪枝，取消下行注释
     # pruner.prune_segments(segments, seg_scores, args.prune_ratio)
 
