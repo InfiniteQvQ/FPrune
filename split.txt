@@ -13,9 +13,9 @@ sparsegpt 20.99 0.2 ww | 21.51 GT
 
 
 llama 7b
-QKV output m 198.12 | QKV     | OUT     |V      |OUT V  |K      |Q      |Q OUT GATE |Gate    |QK     |QK OUT |QKVoutg|QKVout + split |
+QKV output m 198.12 | QKV     | OUT     |V      |OUT V  |K      |Q      |Q OUT GATE |Gate    |QK     |QK OUT |QKVoutg|QKVout + split | GT
            w 22.01  | w 24.33 | w 51.33 |w 29.95|w 31.33|w 26.78|w 27.37|w  26.04   |w 108.09|w 26.85|w 22.99|w 22.21|m 228.5        |
-           s 18.75  |         |         |       |       |       |       |           |         |       |       |      |w 21.69        |
+           s 18.75  |         |         |       |       |       |       |           |         |       |       |      |w 21.69        |w 23.52 0.22ww
                                                                                                                      |s 17.76        |
 
 
