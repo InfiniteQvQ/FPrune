@@ -26,3 +26,10 @@ GT    |QKVout  |QKV      |Q out   |Q out Gate |Q out split |Q out gate split|
 219402|m       |m        |m 54888 |m          |            |                |
 106.56|w 110.9 |w 115.22 |w 82.50 |w 76.65    |w   78.62   |w          71.21|
 37.26 |s       |s        |s 32.22 |s 31.79    |            |s          31.22|
+
+
+llama 2 7b
+GT      |QKVout  |QK out  |
+m nan   |        |        |
+w 31.94 |w 32.93 |w 29.89 |
+s 21.51 |        |        |
