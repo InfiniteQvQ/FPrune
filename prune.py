@@ -1000,6 +1000,7 @@ def ww_sparsity_test_3b(args, model, device=torch.device("cuda:0"),
     layerwise_pruning_ratios_esd = layerwise_pruning_ratios_esd * scaler
     layerwise_pruning_ratios_esd = layerwise_pruning_ratios_esd.cpu().numpy().tolist()
     print("ESD-based ratios:", layerwise_pruning_ratios_esd)
+    return layerwise_pruning_ratios_esd
 
     segments = {
         0: [0],

@@ -4,19 +4,34 @@
 llama 7b
 magnitude_ww 192.69  
 wanda_ww 22.77 | 22.24 0.2 ww | 22.13 0.21 ww   | 24 GT
-sparsegpt 19.67 | 18.49 0.2 ww |  GT-19.326
+sparsegpt 19.67 | 18.49 0.2 ww |  GT-19.326          18.72 0.162     
 
 llama 2 7b
 wanda_ww 30.1 0.25 ww | 32.06 GT | 29.62 split 0.3ww
 magnitdue_ww    2845 0.02 ww | nan GT 
-sparsegpt 20.99 0.2 ww | 21.51 GT
+sparsegpt 20.99 0.2 ww | 21.51 GT                            
 
 
 llama 7b
 QKV output m 198.12 | QKV     | OUT     |V      |OUT V  |K      |Q      |Q OUT GATE |Gate    |QK     |QK OUT |QKVoutg|QKVout + split | GT
            w 22.01  | w 24.33 | w 51.33 |w 29.95|w 31.33|w 26.78|w 27.37|w  26.04   |w 108.09|w 26.85|w 22.99|w 22.21|m 228.5        |
-           s 18.75  |         |         |       |       |       |       |           |         |       |       |      |w 21.69        |w 23.52 0.22ww
+           s 18.75  |         |         |       |       |       |       |           |         |       |       |      |w 21.69        |w 23.52 0.22ww | 21.47 QKVout + split
                                                                                                                      |s 17.76        |
+
+
+
+zero_shot evaluation results
+sparse QKVout + split
+{'results': {'arc_easy': {'acc': 0.48442760942760943, 'acc_stderr': 0.010254806331961897, 'acc_norm': 0.4604377104377104, 'acc_norm_stderr': 0.01022761638628901}, 
+'boolq': {'acc': 0.6623853211009174, 'acc_stderr': 0.008271010075886844}, 'arc_challenge': {'acc': 0.27303754266211605, 'acc_stderr': 0.013019332762635737, 
+'acc_norm': 0.2841296928327645, 'acc_norm_stderr': 0.013179442447653886}, 'rte': {'acc': 0.5234657039711191, 'acc_stderr': 0.030063300411902652}, 
+'hellaswag': {'acc': 0.38020314678350925, 'acc_stderr': 0.004844445265582647, 'acc_norm': 0.5033857797251543, 'acc_norm_stderr': 0.0049896670093726525}, 
+'openbookqa': {'acc': 0.178, 'acc_stderr': 0.017123622189062257, 'acc_norm': 0.324, 'acc_norm_stderr': 0.020950557312477445}, 
+'winogrande': {'acc': 0.6290449881610103, 'acc_stderr': 0.01357639990223157}}, 'versions': {'arc_easy': 0, 'boolq': 1, 'arc_challenge': 0, 'rte': 0, 
+'hellaswag': 0, 'openbookqa': 0, 'winogrande': 0}, 'config': {'model': 'hf-causal-experimental', 'model_args': 'pretrained=pinkmanlove/llama-7b-hf,cache_dir=./llm_weights', 
+'num_fewshot': 0, 'batch_size': None, 'batch_sizes': [], 'device': None, 'no_cache': True, 'limit': None, 'bootstrap_iters': 100000, 'description_dict': {}}}
+
+MEAN: 0.4472
 
 
 LLaMA 2 (7B) V Entropy (Avg): 7.6507
